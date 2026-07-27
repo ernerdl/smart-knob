@@ -182,8 +182,12 @@ let connected=false;
 async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',
   headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):null});return r.json();}
 async function refresh(){const d=await api('/ports');const s=$('port');s.innerHTML='';
-  d.ports.forEach(p=>{const o=document.createElement('option');o.textContent=p;s.appendChild(o);});
-  if(d.ports.length)s.value=d.ports[d.ports.length-1];}
+  d.ports.forEach(p=>{const o=document.createElement('option');
+    o.value=p;o.textContent=p.includes('usbmodem')?(p+'  ← native (bunu sec)'):(p+'  (flash UART)');
+    s.appendChild(o);});
+  // Firmware Serial NATIVE USB'de (usbmodem). usbserial = sadece flash -> okuma/yazma CALISMAZ.
+  const nat=d.ports.find(p=>p.includes('usbmodem'));
+  if(nat)s.value=nat; else if(d.ports.length)s.value=d.ports[d.ports.length-1];}
 async function toggleConn(){if(connected){await api('/disconnect',{});connected=false;$('conn').textContent='Baglan';$('conn').classList.remove('on');}
   else{await api('/connect',{port:$('port').value});connected=true;$('conn').textContent='Kes';$('conn').classList.add('on');
     setTimeout(()=>{send('CFG?');send('BTNMAP?');},400);}}
