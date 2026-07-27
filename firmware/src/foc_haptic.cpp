@@ -516,9 +516,10 @@ static void drawScreen() {
   tft.setCursor(20, 28);
   tft.print(label);
 
+  int shown = (appMode == APP_VOLUME) ? level : dispIdx;   // ses=level bar, space/tabs=aktif index
   char buf[16];
-  if (appMode == APP_VOLUME) { int pct = (detents > 1) ? level * 100 / (detents - 1) : 0; snprintf(buf, sizeof buf, "%d%%", pct); }
-  else     { snprintf(buf, sizeof buf, "%d/%d", level + 1, detents); }
+  if (appMode == APP_VOLUME) { int pct = (detents > 1) ? shown * 100 / (detents - 1) : 0; snprintf(buf, sizeof buf, "%d%%", pct); }
+  else     { snprintf(buf, sizeof buf, "%d/%d", shown + 1, detents); }
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(6);
   int w = (int)strlen(buf) * 36;              // size6 ~36px/karakter
@@ -526,14 +527,14 @@ static void drawScreen() {
   tft.setCursor(x, 95);
   tft.print(buf);
 
-  int barw = (detents > 1) ? level * 280 / (detents - 1) : 0;   // alt seviye cubugu (yatay 320)
+  int barw = (detents > 1) ? shown * 280 / (detents - 1) : 0;   // alt seviye cubugu (yatay 320)
   tft.drawRect(19, 199, 282, 22, tft.color565(60, 60, 60));
   tft.fillRect(20, 200, 280, 20, ST77XX_BLACK);
   tft.fillRect(20, 200, barw, 20, accent);
 }
 
 static void displayTask(void *pv) {
-  int lastLevel = -999, lastDet = -1, lastMode = -1;
+  int lastLevel = -999, lastDet = -1, lastMode = -1, lastIdx = -999;
   int lastDep = -1, lastDigit = -1, lastCount = -1, lastProg = -1; char lastSt[20] = "";
   int lastSec = -1;
   for (;;) {
@@ -543,8 +544,8 @@ static void displayTask(void *pv) {
                        || prog != lastProg || sec != lastSec || strcmp(depStatus, lastSt) != 0);
     lastSec = sec;
     if (depChanged || (depState == DEP_OFF &&
-        (level != lastLevel || (int)appMode != lastMode || detents != lastDet))) {
-      lastLevel = level; lastMode = (int)appMode; lastDet = detents;
+        (level != lastLevel || dispIdx != lastIdx || (int)appMode != lastMode || detents != lastDet))) {
+      lastLevel = level; lastIdx = dispIdx; lastMode = (int)appMode; lastDet = detents;
       lastDep = (int)depState; lastDigit = depDigit; lastCount = depCount; lastProg = prog;
       snprintf(lastSt, sizeof lastSt, "%s", depStatus);
       drawScreen();
