@@ -1,0 +1,11 @@
+# PlatformIO
+.pio/
+firmware/.pio/
+*.o
+*.elf
+*.bin
+# OS
+.DS_Store
+# Python
+__pycache__/
+*.pyc
