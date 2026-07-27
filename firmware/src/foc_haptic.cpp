@@ -17,6 +17,7 @@
 #include <USB.h>
 #include <USBHIDConsumerControl.h>
 #include <USBHIDKeyboard.h>
+#include <USBHIDMouse.h>
 #define FASTLED_INTERNAL
 #include <FastLED.h>
 #include <SPI.h>
@@ -27,15 +28,27 @@
 #define NLED 16
 USBHIDConsumerControl Consumer;   // medya tusu (ses)
 USBHIDKeyboard        Keyboard;   // klavye (Ctrl+ok = masaustu gecis)
+USBHIDMouse           Mouse;      // fare tekeri (scroll modu — her uygulamada calisir)
 
-// Uygulama modu: knob ne kontrol ediyor
-enum AppMode { APP_VOLUME, APP_SPACES, APP_TABS };   // ses / masaustu / chrome sekmeleri
+// Uygulama modu: knob ne kontrol ediyor (knob-modu olan aksiyonlar)
+enum AppMode { APP_VOLUME, APP_SPACES, APP_TABS, APP_BRIGHTNESS, APP_SCROLL };   // ses/masaustu/chrome/parlaklik/scroll
 static AppMode appMode = APP_VOLUME;
 CRGB leds[NLED];                   // FastLED (RMT, TinyUSB ile uyumlu)
-// Moda gore renk (app'ten COL komutu ile ayarlanir): [0]=VOLUME [1]=SPACES
-static CRGB colBase[3]   = { CRGB(0,0,0),   CRGB(0,8,20),  CRGB(20,8,0) };   // VOLUME sonuk, SPACES mavi, TABS turuncu
-static CRGB colActive[3] = { CRGB(0,35,25), CRGB(0,60,0),  CRGB(90,45,0) };  // aktif: yesil / yesil / turuncu
+// Moda gore renk: [0]=VOLUME [1]=SPACES [2]=TABS [3]=BRIGHTNESS [4]=SCROLL
+static CRGB colBase[5]   = { CRGB(0,0,0),   CRGB(0,8,20),  CRGB(20,8,0),  CRGB(20,20,0), CRGB(15,0,20) };   // ses/mavi/turuncu/sari/mor
+static CRGB colActive[5] = { CRGB(0,35,25), CRGB(0,60,0),  CRGB(90,45,0), CRGB(90,80,0), CRGB(70,0,90) };   // aktif renkler
 static float spaceSpacing = 0.26f; // SPACES centik araligi (~15 deg) — aralik ortasina yerlesir
+
+// ---- 8 BUTON -> AKSIYON HARITASI (UI'dan ayarlanir; fiziksel PCF bit sirasi karisik olabilir) ----
+enum BtnAction {
+  ACT_NONE = 0, ACT_VOLUME, ACT_SPACES, ACT_BRIGHTNESS, ACT_DEPLOY,
+  ACT_CLAUDE, ACT_CHROME, ACT_FUSION, ACT_SCROLL, ACT_COUNT
+};
+// Varsayilan: P0..P7 -> istenen 8 fonksiyon (UI 'BTN <bit> <act>' ile degistirir)
+static uint8_t btnAction[8] = {
+  ACT_VOLUME, ACT_SPACES, ACT_BRIGHTNESS, ACT_DEPLOY,
+  ACT_CLAUDE, ACT_CHROME, ACT_FUSION, ACT_SCROLL
+};
 
 // Ekran (ST7789 SPI) — ayri core'da render edilir (FOC'u bloklamaz)
 SPIClass tftSPI(HSPI);
@@ -137,10 +150,14 @@ static int   detentIndex(float a) {
   int i = (int)roundf((a - firstAngle()) / detentSpacing());
   return constrain(i, 0, detents - 1);
 }
+static bool barMode() { return appMode == APP_VOLUME || appMode == APP_BRIGHTNESS; }  // dolan-bar modlari (ses/parlaklik)
 static void updateLED(int lv) {
   CRGB base = colBase[appMode], act = colActive[appMode];
-  if (appMode == APP_VOLUME) {                 // dolan bar: seviyeye kadar aktif renk
+  if (barMode()) {                             // dolan bar: seviyeye kadar aktif renk
     for (int i = 0; i < NLED; i++) leds[i] = (i < lv) ? act : base;
+  } else if (appMode == APP_SCROLL) {          // SCROLL: donen tek nokta (gorsel geri bildirim)
+    fill_solid(leds, NLED, base);
+    leds[((lv % NLED) + NLED) % NLED] = act;
   } else {                                     // SPACES: n centik ORTADA, esit aralikli, AYRI LED'ler (cakisma yok)
     fill_solid(leds, NLED, base);
     int spacing = ((detents - 1) * 2 <= NLED - 1) ? 2 : 1;      // aralik 2 LED (sigmazsa 1)
@@ -154,17 +171,31 @@ static void updateLED(int lv) {
   FastLED.show();
 }
 
+// HYPER kombo (Ctrl+Alt+Cmd+Shift + harf) -> HS bunu yakalar (uygulama ac/odakla, parlaklik vb.)
+static void sendHyper(char key) {
+  Keyboard.press(KEY_LEFT_CTRL); Keyboard.press(KEY_LEFT_SHIFT);
+  Keyboard.press(KEY_LEFT_ALT);  Keyboard.press(KEY_LEFT_GUI);
+  Keyboard.press(key);
+  hidReleaseAt = millis() + 8;   // loop birakir (releaseAll)
+}
+
 // Bir centik adimini moda gore HID olarak gonder (bloklamaz, hidReleaseAt ile birakilir)
 static void sendStep(int dir) {
   if (appMode == APP_VOLUME) {
     Consumer.press(dir > 0 ? CONSUMER_CONTROL_VOLUME_INCREMENT : CONSUMER_CONTROL_VOLUME_DECREMENT);
+    hidReleaseAt = millis() + 8;
   } else if (appMode == APP_SPACES) { // Ctrl+Sag/Sol = masaustu gecis
     Keyboard.press(KEY_LEFT_CTRL);
     Keyboard.press(dir > 0 ? KEY_RIGHT_ARROW : KEY_LEFT_ARROW);
-  } else { // APP_TABS: Chrome-KILITLI -> HS'e F19(next)/F20(prev) bildir, HS AppleScript ile Chrome sekmesini degistirir (odak gerekmez)
+    hidReleaseAt = millis() + 8;
+  } else if (appMode == APP_BRIGHTNESS) { // HS: HYPER + '=' arttir / '-' azalt -> hs.brightness
+    sendHyper(dir > 0 ? '=' : '-');
+  } else if (appMode == APP_SCROLL) {     // fare tekeri (native, her uygulamada calisir, HS yok)
+    Mouse.move(0, 0, dir > 0 ? 1 : -1, 0);   // wheel +yukari / -asagi
+  } else { // APP_TABS: Chrome-KILITLI -> HS'e F19(next)/F20(prev) bildir, HS AppleScript ile sekme degistirir
     Keyboard.press(dir > 0 ? KEY_F19 : KEY_F20);
+    hidReleaseAt = millis() + 8;
   }
-  hidReleaseAt = millis() + 8;
 }
 
 // Mod uygula (MODE komutu VE PCF butonu ayni yoldan kullanir)
@@ -419,6 +450,26 @@ static void handleLine(String s) {
     if (millis() - lastUserMove > 400) { level = n; updateLED(level); }   // kullanici cevirmiyorken senkronla
     return;
   }
+  if (s.startsWith("BR")) {    // parlaklik senkronu (HS) -> LED bar (motoru SURMEZ)
+    if (appMode != APP_BRIGHTNESS) return;
+    int n = constrain((int)s.substring(2).toInt(), 0, detents - 1);
+    if (millis() - lastUserMove > 400) { level = n; updateLED(level); }
+    return;
+  }
+  if (s.startsWith("BTNMAP?")) {   // haritayi dok (UI cekmek icin)
+    Serial.print("BTNMAP");
+    for (int i = 0; i < 8; i++) Serial.printf(" %d", btnAction[i]);
+    Serial.println();
+    return;
+  }
+  if (s.startsWith("BTN ")) {  // BTN <bit 0..7> <act 0..8> : fiziksel butonu aksiyona esle (UI'dan)
+    int bit = -1, act = -1; sscanf(s.c_str() + 3, "%d %d", &bit, &act);
+    if (bit >= 0 && bit < 8 && act >= 0 && act < ACT_COUNT) {
+      btnAction[bit] = (uint8_t)act;
+      Serial.printf("BTN %d -> act %d\n", bit, act);
+    }
+    return;
+  }
   char c = s[0];
   String v = s.substring(1); v.trim();
   if (c=='v') { motor.voltage_limit = v.toFloat(); Serial.printf("voltage_limit=%.2f\n", motor.voltage_limit); }
@@ -506,9 +557,11 @@ static void drawScreen() {
   }
   const char* label; uint16_t accent;
   switch (appMode) {
-    case APP_VOLUME: label = "SES";      accent = tft.color565(0, 220, 120); break;
-    case APP_SPACES: label = "MASAUSTU"; accent = tft.color565(0, 180, 255); break;
-    default:         label = "SEKME";    accent = tft.color565(255, 150, 0); break;  // tabs
+    case APP_VOLUME:     label = "SES";       accent = tft.color565(0, 220, 120); break;
+    case APP_SPACES:     label = "MASAUSTU";  accent = tft.color565(0, 180, 255); break;
+    case APP_BRIGHTNESS: label = "PARLAKLIK"; accent = tft.color565(240, 220, 0); break;
+    case APP_SCROLL:     label = "SCROLL";    accent = tft.color565(180, 60, 240); break;
+    default:             label = "SEKME";     accent = tft.color565(255, 150, 0); break;  // tabs
   }
   tft.fillScreen(ST77XX_BLACK);
   tft.setTextColor(accent);
@@ -516,9 +569,9 @@ static void drawScreen() {
   tft.setCursor(20, 28);
   tft.print(label);
 
-  int shown = (appMode == APP_VOLUME) ? level : dispIdx;   // ses=level bar, space/tabs=aktif index
+  int shown = barMode() ? level : dispIdx;   // ses/parlaklik=level bar, space/tabs=aktif index
   char buf[16];
-  if (appMode == APP_VOLUME) { int pct = (detents > 1) ? shown * 100 / (detents - 1) : 0; snprintf(buf, sizeof buf, "%d%%", pct); }
+  if (barMode()) { int pct = (detents > 1) ? shown * 100 / (detents - 1) : 0; snprintf(buf, sizeof buf, "%d%%", pct); }
   else     { snprintf(buf, sizeof buf, "%d/%d", shown + 1, detents); }
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(6);
@@ -552,6 +605,25 @@ static void displayTask(void *pv) {
     }
     vTaskDelay(40 / portTICK_PERIOD_MS);
   }
+}
+
+// Buton aksiyonu uygula (haritadan gelen act ID). Modlar appMode + F-tusu (HS senkron); app'ler HYPER kombo.
+static void doAction(uint8_t act) {
+  // DEPLOY disindaki her aksiyon once deploy'dan CIKAR (yanlislikla girince kilitli kalmasin).
+  // Ceza suresi (depLockUntil) korunur -> tekrar deploy'a girisi depEnter yine engeller.
+  if (act != ACT_DEPLOY && depState != DEP_OFF) depState = DEP_OFF;
+  switch (act) {
+    case ACT_VOLUME:     applyMode(APP_VOLUME);     Keyboard.press(KEY_F16); break;
+    case ACT_SPACES:     applyMode(APP_SPACES);     Keyboard.press(KEY_F17); break;
+    case ACT_BRIGHTNESS: applyMode(APP_BRIGHTNESS); Keyboard.press(KEY_F14); break;
+    case ACT_CHROME:     applyMode(APP_TABS);       Keyboard.press(KEY_F18); break;
+    case ACT_SCROLL:     applyMode(APP_SCROLL);     return;   // native fare tekeri (HS yok)
+    case ACT_DEPLOY:     depEnter();  return;                 // kasa kilidi modu (tus yok)
+    case ACT_CLAUDE:     sendHyper('j'); return;              // HS: Claude ac/odakla
+    case ACT_FUSION:     sendHyper('g'); return;              // HS: Fusion ac/odakla
+    default: return;
+  }
+  delay(5); Keyboard.releaseAll();
 }
 
 void setup() {
@@ -613,6 +685,7 @@ void setup() {
 
   Consumer.begin();   // native USB HID (ses tusu)
   Keyboard.begin();   // klavye (Ctrl+ok = masaustu gecis)
+  Mouse.begin();      // fare tekeri (scroll modu)
   USB.begin();
 
   level = detentIndex(motor.shaft_angle);   // baslangic seviyesi mevcut konumdan
@@ -681,9 +754,12 @@ void loop() {
       relAnchor += step * sp;                             // referansi bir centik kaydir
       if (millis() - modeSwitchAt > 500) {
         pendingHid += step; lastUserMove = millis();
-        if (appMode == APP_VOLUME) {                      // ses: LED bar seviyesi (0..detents-1), macOS %0/%100'de durdurur
+        if (barMode()) {                                  // ses/parlaklik: LED bar seviyesi (0..detents-1)
           level = constrain(level + step, 0, detents - 1);
           updateLED(level);
+        } else if (appMode == APP_SCROLL) {               // scroll: donen nokta (wrap)
+          dispIdx = (dispIdx + step + NLED) % NLED;
+          updateLED(dispIdx);
         } else {                                          // space/tabs: aktif index (iyimser; HS teyit eder)
           dispIdx = constrain(dispIdx + step, 0, detents - 1);
           updateLED(dispIdx);
@@ -703,19 +779,12 @@ void loop() {
       uint8_t b = Wire1.read();
       uint8_t pressed = lastBtn & ~b;   // dusen kenar: onceki 1, simdi 0 = yeni basildi
       if (pressed) {
-        // Buton haritasi: P1 -> Chrome/sekme, digerleri -> ses<->masaustu toggle
-        // HS'e mod bildir (F16=volume, F17=spaces, F18=tabs+Chrome ac) -> HS o modun durumunu geri yollar
-        if (pressed & 0x04) {          // P2 = DEPLOY -> kasa kilidi moduna gir (F21 KOL onayindan sonra gider)
-          depEnter();
-        } else if (pressed & 0x02) {   // P1 = Chrome tusu
-          applyMode(APP_TABS);
-          Keyboard.press(KEY_F18);
-        } else {                       // P0 vb. = ses <-> masaustu
-          applyMode(appMode == APP_VOLUME ? APP_SPACES : APP_VOLUME);
-          Keyboard.press(appMode == APP_VOLUME ? KEY_F16 : KEY_F17);
+        // Ilk basili biti bul (0..7) -> haritadan aksiyon. UI 'BTN <bit> <act>' ile esler.
+        int bit = 0; while (bit < 8 && !(pressed & (1 << bit))) bit++;
+        if (bit < 8) {
+          Serial.printf("BTNPRESS %d\n", bit);   // UI 'ogren' bunu yakalar
+          doAction(btnAction[bit]);
         }
-        delay(5); Keyboard.releaseAll();
-        Serial.printf("BUTON 0x%02X -> mod=%d\n", pressed, (int)appMode);
       }
       lastBtn = b;
     }

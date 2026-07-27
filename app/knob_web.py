@@ -148,6 +148,11 @@ HTML = r"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
     <span class="val" id="v_b">0.30</span></div>
 </fieldset>
 
+<fieldset><legend>Buton esleme — fiziksel sira karisiksa</legend>
+  <div class="muted" style="margin-bottom:8px">Her fonksiyon icin <b>Ogren</b>'e bas, sonra atamak istedigin fiziksel butona bas.</div>
+  <div id="btnmap"></div>
+</fieldset>
+
 <fieldset><legend>Deploy sifresi (kasa kilidi)</legend>
   <div class="row">
     <input type="number" id="p0" min="1" max="19" value="3" style="width:60px">
@@ -181,7 +186,7 @@ async function refresh(){const d=await api('/ports');const s=$('port');s.innerHT
   if(d.ports.length)s.value=d.ports[d.ports.length-1];}
 async function toggleConn(){if(connected){await api('/disconnect',{});connected=false;$('conn').textContent='Baglan';$('conn').classList.remove('on');}
   else{await api('/connect',{port:$('port').value});connected=true;$('conn').textContent='Kes';$('conn').classList.add('on');
-    setTimeout(()=>send('CFG?'),400);}}
+    setTimeout(()=>{send('CFG?');send('BTNMAP?');},400);}}
 function send(line){api('/send',{line});}
 function setMode(m){send('MODE '+m);highlightMode(m);setTimeout(()=>send('CFG?'),200);}
 function highlightMode(m){['volume','spaces','tabs'].forEach(x=>$('m_'+x).classList.toggle('on',x===m));}
@@ -192,18 +197,47 @@ function sendCol(slot,hex){const r=parseInt(hex.substr(1,2),16),g=parseInt(hex.s
 function sv(k,v){$('v_'+k).textContent=(k==='b')?parseFloat(v).toFixed(2):v;}
 function sendS(k){const v=$('s_'+k).value;send((k==='b')?('b '+parseFloat(v).toFixed(2)):(k+' '+parseInt(v)));}
 function hex(csv){return '#'+csv.split(',').map(x=>(+x).toString(16).padStart(2,'0')).join('');}
+// ---- Buton esleme (act ID'ler firmware enum ile AYNI olmali) ----
+const FUNCS=[{act:1,name:'🔊 Ses'},{act:2,name:'🖥️ Masaustu'},{act:3,name:'☀️ Parlaklik'},
+  {act:4,name:'🚀 Deploy'},{act:5,name:'🤖 Claude'},{act:6,name:'🌐 Chrome'},
+  {act:7,name:'📐 Fusion'},{act:8,name:'🖱️ Scroll'}];
+let actToBit={};          // act -> hangi fiziksel bit
+let learnAct=null;        // su an ogrenilen fonksiyon (act)
+function renderBtnMap(){const box=$('btnmap');box.innerHTML='';
+  FUNCS.forEach(f=>{const row=document.createElement('div');row.className='row';
+    const b=actToBit[f.act];
+    row.innerHTML=`<label style="flex:0 0 130px">${f.name}</label>
+      <span class="val" style="width:70px" id="bit_${f.act}">${b===undefined?'—':('Buton '+(b+1))}</span>
+      <button id="learn_${f.act}" onclick="learn(${f.act})">Ogren</button>`;
+    box.appendChild(row);});
+}
+function learn(act){learnAct=act;
+  FUNCS.forEach(f=>{const bt=$('learn_'+f.act);if(bt)bt.classList.remove('on');});
+  const b=$('learn_'+act);if(b){b.classList.add('on');b.textContent='Butona bas...';}}
+function applyBtnPress(bit){if(learnAct===null)return;
+  send('BTN '+bit+' '+learnAct);
+  // ayni bit baska fonksiyondaysa onu temizle (tek buton tek is)
+  for(const a in actToBit){if(actToBit[a]===bit&&+a!==learnAct)delete actToBit[a];}
+  actToBit[learnAct]=bit;const done=learnAct;learnAct=null;
+  const b=$('learn_'+done);if(b){b.classList.remove('on');b.textContent='Ogren';}
+  renderBtnMap();}
 let seen=0;
 async function poll(){try{const d=await api('/poll?since='+seen);
   if(d.lines.length){const L=$('log');d.lines.forEach(x=>{L.textContent+=x+'\n';parseLine(x);});L.scrollTop=L.scrollHeight;seen=d.next;}
 }catch(e){}setTimeout(poll,300);}
-function parseLine(line){if(!line.startsWith('CFG'))return;const kv={};
+function parseLine(line){
+  if(line.startsWith('BTNPRESS')){const bit=parseInt(line.split(/\s+/)[1]);
+    if(!isNaN(bit))applyBtnPress(bit);return;}
+  if(line.startsWith('BTNMAP')){const a=line.split(/\s+/).slice(1).map(x=>parseInt(x));
+    actToBit={};a.forEach((act,bit)=>{if(act>0)actToBit[act]=bit;});renderBtnMap();return;}
+  if(!line.startsWith('CFG'))return;const kv={};
   line.split(/\s+/).slice(1).forEach(t=>{const i=t.indexOf('=');if(i>0)kv[t.slice(0,i)]=t.slice(i+1);});
   if(kv.mode!==undefined)highlightMode(kv.mode==='0'?'volume':kv.mode==='1'?'spaces':'tabs');
   const map={detents:'d',Kdet:'k',Kwall:'W',damping:'b'};
   for(const f in map){if(kv[f]!==undefined){const s=$('s_'+map[f]);s.value=kv[f];sv(map[f],kv[f]);}}
   if(kv.base)$('col_b').value=hex(kv.base);
   if(kv.act)$('col_a').value=hex(kv.act);}
-refresh();poll();
+renderBtnMap();refresh();poll();
 </script></body></html>"""
 
 
