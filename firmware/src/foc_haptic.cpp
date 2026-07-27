@@ -42,12 +42,8 @@ SPIClass tftSPI(HSPI);
 Adafruit_ST7789 tft = Adafruit_ST7789(&tftSPI, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
 static int level = 8;             // VOLUME: mutlak seviye 0..16 (detent index)
 static uint32_t hidReleaseAt = 0;
-// B: forcing SADECE VOLUME dis-senkron repoze icin (menu cubugundan ses degisince knob o seviyeye gider).
-// ESKI SERT/HIZLI hal: dogrudan yay + 1.5sn timeout -> hedefe cabuk varir, savas penceresi kisa.
-static bool  forcing = false;
-static int   forceLevel = 8;
-static float Kforce = 18.0f;      // sert yay kazanci (yuksek = hizli varis)
-// SPACES/TABS: GORELI mod — motor mutlak konuma zorlanmaz (forcing YOK), hareket delta'sindan adim uretir
+static bool forcing = false;      // ARTIK KULLANILMIYOR (sync motoru surmez) — sadece eski guard'lar icin false kalir
+// SPACES/TABS: GORELI mod — motor mutlak konuma zorlanmaz, hareket delta'sindan adim uretir
 static float relAnchor = 0;       // son islenmis centik merkezi (goreli grid referansi)
 static int   dispIdx = 0;         // LED'de gosterilen aktif index (HS'ten SP/TAB ile gelir; KOZMETIK)
 
@@ -430,9 +426,8 @@ static void handleLine(String s) {
   if (s.startsWith("VOL")) {   // Mac ses senkronu (SADECE volume modunda)
     if (appMode != APP_VOLUME) return;
     int n = constrain((int)s.substring(3).toInt(), 0, detents - 1);
-    // B: dis ses degisince knob o seviyeye SERT/HIZLI gider (repoze). Kullanici cevirirken (500ms) yok say.
-    if (millis() - lastUserMove < 500) return;
-    if (n != level) { forceLevel = n; forcing = true; forceStart = millis(); }
+    // VOLUME MUTLAK dial: knob konumu = kaynak. Dis ses degisikligi motoru SURMEZ (sync savasi yok).
+    (void)n;
     return;
   }
   char c = s[0];
@@ -660,28 +655,19 @@ void loop() {
     // DEPLOY modu (kasa kilidi/kol) -> torku o uretir, normal haptik+HID atlanir
   } else if (fabsf(motor.shaft_velocity) > 40.0f) {   // VELOCITY CUTOFF (SmartKnob): runaway yok
     t = 0;
-  } else if (forcing) {
-    // B: SADECE VOLUME dis-senkron repoze. ESKI SERT yay -> hedefe HIZLA varir (uzun savas yok).
-    float e = motor.shaft_angle - levelAngle(forceLevel);
-    t = -Kforce * e;
-    t -= damping * motor.shaft_velocity;
-    bool reached = fabsf(e) < detentSpacing() * 0.2f && fabsf(motor.shaft_velocity) < 0.6f;
-    if (reached || millis() - forceStart > 1500) {    // 1.5sn HARD timeout (3sn DEGIL)
-      forcing = false; level = forceLevel; updateLED(level); pendingHid = 0;
-    }
   } else {
-    // Yerel deterministik haptik (space/tabs burada; forcing ASLA tetiklenmez orada).
+    // TEK yol: yerel deterministik haptik. Sync ARTIK motoru surmez -> 3sn titreme/atlama yok.
     t = hapticTorque(motor.shaft_angle);
     t -= damping * motor.shaft_velocity;
   }
-  float vmax = forcing ? 7.0f : motor.voltage_limit;
+  float vmax = motor.voltage_limit;
   lastT = _constrain(t, -vmax, vmax);
   motor.move(lastT);
 
   if (hidReleaseAt && millis() >= hidReleaseAt) { Consumer.release(); Keyboard.releaseAll(); hidReleaseAt = 0; }
 
   // --- centik takibi + LED (forcing'de de LED guncelle, ama HID biriktirme) ---
-  if (mode == M_DETENT && depState == DEP_OFF && !forcing) {   // forcing (volume repoze) sirasinda sahte adim uretme
+  if (mode == M_DETENT && depState == DEP_OFF) {
     // SNAP-POINT HISTEREZISI: centik degismesi icin komsu merkezi %60 gecmeli (flip-flop/sahte HID yok).
     float sp = detentSpacing();
     int step = 0;
