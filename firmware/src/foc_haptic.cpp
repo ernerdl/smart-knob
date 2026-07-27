@@ -140,7 +140,8 @@ static float midA() { return 0.5f * (minA + maxA); }
 // VOLUME: centikler tum kullanilabilir araliga yayilir.
 // KURAL: VOLUME tum araliga yayilir; DIGER TUM modlar (spaces/tabs/...) ORTADA toplu, sabit aralikli
 static float detentSpacing() {
-  return (appMode == APP_VOLUME) ? volSpacing : spaceSpacing;   // hepsi goreli sabit aralik
+  if (appMode == APP_SCROLL) return 0.055f;   // INCE -> responsive scroll (her ~3° 1 tekerlek tiki)
+  return (appMode == APP_VOLUME || appMode == APP_BRIGHTNESS) ? volSpacing : spaceSpacing;
 }
 static float firstAngle() {   // ilk centigin (index 0) acisi
   if (appMode != APP_VOLUME) return midA() - 0.5f * (detents - 1) * spaceSpacing;  // ortala
@@ -330,6 +331,7 @@ static bool depUpdate(float &t) {
 
 static float hapticTorque(float a) {
   if (mode == M_FREE) return 0;
+  if (appMode == APP_SCROLL) return 0;   // SCROLL: serbest spin, centik YOK (tik emme tracking'de, ince)
   // HERSEY DUVARSIZ GORELI: sonsuz centik gridi -> her mod serbest, her centik = bir adim.
   // Yazilim duvari YOK (fiziksel ~300° mekanik stop tek sinir; ortalama bizi ondan uzak tutar).
   // Konum mutlak degil (relAnchor'a gore) -> mod gecisinde "konum=deger" cakismasi yok.
