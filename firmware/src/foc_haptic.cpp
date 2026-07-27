@@ -40,12 +40,18 @@ static float spaceSpacing = 0.26f; // SPACES centik araligi (~15 deg) — aralik
 // Ekran (ST7789 SPI) — ayri core'da render edilir (FOC'u bloklamaz)
 SPIClass tftSPI(HSPI);
 Adafruit_ST7789 tft = Adafruit_ST7789(&tftSPI, PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST);
-static int level = 8;             // VOLUME: mutlak seviye 0..16 (detent index)
+static int level = 8;             // VOLUME: LED barinda gosterilen seviye 0..16 (KONUMDAN bagimsiz, goreli sayac)
 static uint32_t hidReleaseAt = 0;
-static bool forcing = false;      // ARTIK KULLANILMIYOR (sync motoru surmez) — sadece eski guard'lar icin false kalir
-// SPACES/TABS: GORELI mod — motor mutlak konuma zorlanmaz, hareket delta'sindan adim uretir
+static bool forcing = false;      // ARTIK KULLANILMIYOR (sync motoru surmez) — eski guard'lar icin false kalir
+// HERSEY GORELI: motor mutlak konuma zorlanmaz, hareket delta'sindan adim uretir.
 static float relAnchor = 0;       // son islenmis centik merkezi (goreli grid referansi)
 static int   dispIdx = 0;         // LED'de gosterilen aktif index (HS'ten SP/TAB ile gelir; KOZMETIK)
+static float volSpacing = 0.15f;  // VOLUME goreli centik araligi (~8.6°; 16 adim ~137° < 300° -> fiziksel araliga sigar)
+// MOD GECISI ORTALAMA: mod degisince motor bir kerelik fiziksel ORTAYA doner -> iki yone de yer acilir.
+// SABIT hedefe (orta) gider, DEGERE degil -> kovalanan hareketli hedef yok, forcing gibi savasamaz.
+static bool     centering = false;
+static uint32_t centerStart = 0;
+static float    Kcenter = 6.0f;   // ortalama yayi (NAZIK -> kullanici kolayca override eder)
 
 // ================= DEPLOY KASA KILIDI =================
 // P2 -> sifre girisi (sag N tik, sol N tik, ... 4 hane) -> dogruysa KOL (sertlesen 120°) -> deploy
@@ -119,8 +125,7 @@ static float midA() { return 0.5f * (minA + maxA); }
 // VOLUME: centikler tum kullanilabilir araliga yayilir.
 // KURAL: VOLUME tum araliga yayilir; DIGER TUM modlar (spaces/tabs/...) ORTADA toplu, sabit aralikli
 static float detentSpacing() {
-  if (appMode != APP_VOLUME) return spaceSpacing;
-  return (maxA - minA - 2*wallMargin) / (detents - 1);
+  return (appMode == APP_VOLUME) ? volSpacing : spaceSpacing;   // hepsi goreli sabit aralik
 }
 static float firstAngle() {   // ilk centigin (index 0) acisi
   if (appMode != APP_VOLUME) return midA() - 0.5f * (detents - 1) * spaceSpacing;  // ortala
@@ -169,10 +174,12 @@ static void applyMode(AppMode m) {
   else if (m == APP_TABS)  { detents = 8;  Kdet = 30.0f; }   // HS 'TAB n idx' ile gunceller
   else                     { detents = 17; Kdet = 22.0f; }   // volume
   forcing = false;
-  if (m == APP_VOLUME) { level = detentIndex(motor.shaft_angle); updateLED(level); }
-  else                 { relAnchor = motor.shaft_angle; dispIdx = 0; updateLED(dispIdx); }  // goreli: bulundugun yer referans
+  relAnchor = motor.shaft_angle;                 // goreli referans (ortalama bitince guncellenir)
+  updateLED(appMode == APP_VOLUME ? level : dispIdx);
   pendingHid = 0;
   modeSwitchAt = millis();   // geçiş sonrası HID gonderme (sahte navigasyon yok)
+  centering = true; centerStart = millis();      // motor fiziksel ORTAYA donsun -> iki yone de yer ac
+  Serial.printf("MOD %d -> ORTALAMA basladi (hedef=%.1f deg)\n", (int)m, midA()*180.0f/PI);
 }
 
 // ---- DEPLOY: yardimcilar ----
@@ -290,33 +297,16 @@ static bool depUpdate(float &t) {
 
 static float hapticTorque(float a) {
   if (mode == M_FREE) return 0;
-  // SPACES/TABS: DUVARSIZ, sonsuz goreli centik gridi -> serbest doner, her centik = bir adim.
-  // Duvar yok => "uca dayanip ilerleyememe" sorunu yok. Konum mutlak degil (relAnchor'a gore).
-  if (appMode != APP_VOLUME && mode == M_DETENT) {
-    float sp = spaceSpacing;
+  // HERSEY DUVARSIZ GORELI: sonsuz centik gridi -> her mod serbest, her centik = bir adim.
+  // Yazilim duvari YOK (fiziksel ~300° mekanik stop tek sinir; ortalama bizi ondan uzak tutar).
+  // Konum mutlak degil (relAnchor'a gore) -> mod gecisinde "konum=deger" cakismasi yok.
+  if (mode == M_DETENT) {
+    float sp = detentSpacing();
     float c  = relAnchor + roundf((a - relAnchor) / sp) * sp;
     return -Kdet * (a - c);
   }
-  // VOLUME: MUTLAK dial, yazilim duvarli (0%..100% gercek sinir).
-  float dMin = minA + wallMargin, dMax = maxA - wallMargin;
-  if (a < dMin) return  Kwall * (dMin - a);   // yazilim duvari (orantili rampa, sert geri-tepme yok)
-  if (a > dMax) return -Kwall * (a - dMax);
-  switch (mode) {
-    case M_DETENT: {
-      float span = dMax - dMin;
-      if (span < 1e-3f) return 0;
-      float sp = (detents > 1) ? span / (detents - 1) : span;
-      float idx = roundf((a - dMin) / sp);
-      idx = fmaxf(0, fminf(detents - 1, idx));
-      float c = dMin + idx * sp;
-      return -Kdet * (a - c);
-    }
-    case M_SPRING:
-      return -Kspring * (a - 0.5f * (minA + maxA));
-    case M_ENDSTOP:
-      return 0;   // sinirlar icinde serbest (yazilim duvari yukarida)
-    default: return 0;
-  }
+  if (mode == M_SPRING) return -Kspring * (a - 0.5f * (minA + maxA));
+  return 0;   // M_ENDSTOP/diger: serbest
 }
 
 // --- HOMING: fiziksel duvarlari bul (HIZ-SINIRLI yaklasim -> duvara NAZIK dayanir, slam yok) ---
@@ -423,11 +413,10 @@ static void handleLine(String s) {
       colActive[appMode].r, colActive[appMode].g, colActive[appMode].b);
     return;
   }
-  if (s.startsWith("VOL")) {   // Mac ses senkronu (SADECE volume modunda)
+  if (s.startsWith("VOL")) {   // Mac ses senkronu -> SADECE LED barini boyar (motoru SURMEZ, savas yok)
     if (appMode != APP_VOLUME) return;
     int n = constrain((int)s.substring(3).toInt(), 0, detents - 1);
-    // VOLUME MUTLAK dial: knob konumu = kaynak. Dis ses degisikligi motoru SURMEZ (sync savasi yok).
-    (void)n;
+    if (millis() - lastUserMove > 400) { level = n; updateLED(level); }   // kullanici cevirmiyorken senkronla
     return;
   }
   char c = s[0];
@@ -655,40 +644,47 @@ void loop() {
     // DEPLOY modu (kasa kilidi/kol) -> torku o uretir, normal haptik+HID atlanir
   } else if (fabsf(motor.shaft_velocity) > 40.0f) {   // VELOCITY CUTOFF (SmartKnob): runaway yok
     t = 0;
+  } else if (centering) {
+    // MOD GECISI ORTALAMA: sabit hedef=fiziksel orta. NAZIK yay (dusuk V) -> kullanici kolay override eder.
+    float e = motor.shaft_angle - midA();
+    t = -Kcenter * e;
+    t -= damping * motor.shaft_velocity;
+    bool reached     = fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f;   // ortaya oturdu
+    bool pushingAway = (e * motor.shaft_velocity) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
+    if (reached || pushingAway || millis() - centerStart > 1200) {
+      centering = false;
+      relAnchor = motor.shaft_angle;   // goreli grid'i knob'un su anki yerinden baslat
+      Serial.printf("ORTALAMA bitti (%s) aci=%.1f\n",
+        reached ? "oturdu" : pushingAway ? "kullanici-dokundu" : "timeout", motor.shaft_angle*180.0f/PI);
+    }
   } else {
-    // TEK yol: yerel deterministik haptik. Sync ARTIK motoru surmez -> 3sn titreme/atlama yok.
+    // TEK yol: yerel deterministik haptik. Sync ARTIK motoru surmez -> titreme/atlama yok.
     t = hapticTorque(motor.shaft_angle);
     t -= damping * motor.shaft_velocity;
   }
-  float vmax = motor.voltage_limit;
+  float vmax = centering ? 2.5f : motor.voltage_limit;   // ortalama NAZIK (dusuk V, savasamaz)
   lastT = _constrain(t, -vmax, vmax);
   motor.move(lastT);
 
   if (hidReleaseAt && millis() >= hidReleaseAt) { Consumer.release(); Keyboard.releaseAll(); hidReleaseAt = 0; }
 
   // --- centik takibi + LED (forcing'de de LED guncelle, ama HID biriktirme) ---
-  if (mode == M_DETENT && depState == DEP_OFF) {
-    // SNAP-POINT HISTEREZISI: centik degismesi icin komsu merkezi %60 gecmeli (flip-flop/sahte HID yok).
+  if (mode == M_DETENT && depState == DEP_OFF && !centering) {   // ortalama sirasinda sahte adim uretme
+    // HERSEY GORELI: hareket delta'sindan adim (SNAP %60 histerezisi, flip-flop yok). Duvar/sinir yok.
     float sp = detentSpacing();
+    float d  = motor.shaft_angle - relAnchor;
     int step = 0;
-    if (appMode == APP_VOLUME) {                          // MUTLAK: level 0..detents-1 sinirli
-      float d = motor.shaft_angle - levelAngle(level);
-      if (d >  sp * 0.6f && level < detents - 1) step = +1;
-      else if (d < -sp * 0.6f && level > 0)      step = -1;
-      if (step != 0) {
-        level += step;
-        if (millis() - modeSwitchAt > 500) { pendingHid += step; lastUserMove = millis(); }
-        updateLED(level);
-      }
-    } else {                                              // GORELI: hareket delta'sindan adim; duvar/sinir yok
-      float d = motor.shaft_angle - relAnchor;
-      if (d >  sp * 0.6f) step = +1;
-      else if (d < -sp * 0.6f) step = -1;
-      if (step != 0) {
-        relAnchor += step * sp;                           // referansi bir centik kaydir
-        if (millis() - modeSwitchAt > 500) {
-          pendingHid += step; lastUserMove = millis();
-          dispIdx = constrain(dispIdx + step, 0, detents - 1);  // LED'i iyimser guncelle (HS sonra duzeltir)
+    if (d >  sp * 0.6f) step = +1;
+    else if (d < -sp * 0.6f) step = -1;
+    if (step != 0) {
+      relAnchor += step * sp;                             // referansi bir centik kaydir
+      if (millis() - modeSwitchAt > 500) {
+        pendingHid += step; lastUserMove = millis();
+        if (appMode == APP_VOLUME) {                      // ses: LED bar seviyesi (0..detents-1), macOS %0/%100'de durdurur
+          level = constrain(level + step, 0, detents - 1);
+          updateLED(level);
+        } else {                                          // space/tabs: aktif index (iyimser; HS teyit eder)
+          dispIdx = constrain(dispIdx + step, 0, detents - 1);
           updateLED(dispIdx);
         }
       }
