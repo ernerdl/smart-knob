@@ -44,10 +44,12 @@ enum BtnAction {
   ACT_NONE = 0, ACT_VOLUME, ACT_SPACES, ACT_BRIGHTNESS, ACT_DEPLOY,
   ACT_CLAUDE, ACT_CHROME, ACT_FUSION, ACT_SCROLL, ACT_COUNT
 };
-// Varsayilan: P0..P7 -> istenen 8 fonksiyon (UI 'BTN <bit> <act>' ile degistirir)
+// Varsayilan harita (fiziksel dizilis TERS: bit sirasi tersine cevrildi -> alt/ust duzeldi).
+// bit0..bit7 = scroll,fusion,chrome,claude,deploy,parlaklik,space,ses
+// (UI 'BTN <bit> <act>' ile degistirilebilir; ikili takas gerekirse soyle, degistiririm)
 static uint8_t btnAction[8] = {
-  ACT_VOLUME, ACT_SPACES, ACT_BRIGHTNESS, ACT_DEPLOY,
-  ACT_CLAUDE, ACT_CHROME, ACT_FUSION, ACT_SCROLL
+  ACT_SCROLL, ACT_FUSION, ACT_CHROME, ACT_CLAUDE,
+  ACT_DEPLOY, ACT_BRIGHTNESS, ACT_SPACES, ACT_VOLUME
 };
 
 // Ekran (ST7789 SPI) — ayri core'da render edilir (FOC'u bloklamaz)
