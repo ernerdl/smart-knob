@@ -191,8 +191,8 @@ static void sendStep(int dir) {
     Keyboard.press(KEY_LEFT_CTRL);
     Keyboard.press(dir > 0 ? KEY_RIGHT_ARROW : KEY_LEFT_ARROW);
     hidReleaseAt = millis() + 8;
-  } else if (appMode == APP_BRIGHTNESS) { // HS: HYPER + '=' arttir / '-' azalt -> hs.brightness
-    sendHyper(dir > 0 ? '=' : '-');
+  } else if (appMode == APP_BRIGHTNESS) { // HS: HYPER+U arttir / HYPER+N azalt (=/- macOS zoom ile cakisiyordu)
+    sendHyper(dir > 0 ? 'u' : 'n');
   } else if (appMode == APP_SCROLL) {     // fare tekeri (native, her uygulamada calisir, HS yok)
     Mouse.move(0, 0, dir > 0 ? 1 : -1, 0);   // wheel +yukari / -asagi
   } else { // APP_TABS: Chrome-KILITLI -> HS'e F19(next)/F20(prev) bildir, HS AppleScript ile sekme degistirir
