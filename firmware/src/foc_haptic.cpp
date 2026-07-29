@@ -625,8 +625,7 @@ static void doAction(uint8_t act) {
     case ACT_BRIGHTNESS: applyMode(APP_BRIGHTNESS); Keyboard.press(KEY_F14); break;
     case ACT_CHROME:     applyMode(APP_TABS);       Keyboard.press(KEY_F18); break;
     case ACT_SCROLL:     applyMode(APP_SCROLL);     return;   // native fare tekeri (HS yok)
-    case ACT_DEPLOY:     sendHyper('d'); return;             // HS: Sevincli ERP sunucu durumu sayfasini ac
-    // (eski kasa-kilidi deploy depEnter() parked -> gerekince geri baglariz)
+    case ACT_DEPLOY:     depEnter(); return;                 // kasa kilidi deploy menusu (sifre + kol)
     case ACT_CLAUDE:     sendHyper('j'); return;              // HS: Claude ac/odakla
     case ACT_FUSION:     sendHyper('g'); return;              // HS: Fusion ac/odakla
     default: return;
