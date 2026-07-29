@@ -70,7 +70,7 @@ static float    Kcenter = 6.0f;   // ortalama yayi (NAZIK -> kullanici kolayca o
 
 // ================= DEPLOY KASA KILIDI =================
 // P2 -> sifre girisi (sag N tik, sol N tik, ... 4 hane) -> dogruysa KOL (sertlesen 120°) -> deploy
-enum DeployState { DEP_OFF, DEP_ENTRY, DEP_POS, DEP_LEVER, DEP_RUNNING, DEP_LOCKED };
+enum DeployState { DEP_OFF, DEP_CENTER, DEP_ENTRY, DEP_POS, DEP_LEVER, DEP_RUNNING, DEP_LOCKED };
 static DeployState depState = DEP_OFF;
 static uint8_t  depCombo[4]   = {3, 5, 7, 1};   // panelden: PIN a b c d
 static int      depDigit = 0, depCount = 0, depDir = 0, depLastTick = 0, depFirstDir = 0;
@@ -226,7 +226,7 @@ static void depResetEntry() {
 }
 static void depEnter() {                       // P2 -> kasa moduna gir
   if (millis() < depLockUntil) { depState = DEP_LOCKED; return; }
-  depState = DEP_ENTRY; depResetEntry(); depStatus[0] = 0;
+  depState = DEP_CENTER; depStatus[0] = 0; depIdleAt = millis();   // once ORTALA -> sifre tiklarina iki yone yer
 }
 static void depWrong() {                       // yanlis hane -> titret, 3 hatada kilitle
   depShakeUntil = millis() + 600;
@@ -276,6 +276,14 @@ static bool depUpdate(float &t) {
     return true;
   }
   switch (depState) {
+    case DEP_CENTER: {                               // sifre oncesi: knob'u fiziksel ORTAYA al (iki yone yer ac)
+      float e = a - midA();
+      t = -Kcenter * e - 1.4f * motor.shaft_velocity;   // guclu sonum -> overshoot yok
+      if ((fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f) || now - depIdleAt > 1500) {
+        depState = DEP_ENTRY; depResetEntry();       // merkezden basla, tik saymaya gec
+      }
+      return true;
+    }
     case DEP_LOCKED:
       if (now >= depLockUntil) depState = DEP_OFF;
       t = 0; return true;
@@ -528,7 +536,9 @@ static void drawScreen() {
   if (depState != DEP_OFF) {
     tft.fillScreen(ST77XX_BLACK);
     char b[32];
-    if (depState == DEP_LOCKED) {
+    if (depState == DEP_CENTER) {
+      tft.setTextColor(tft.color565(255,180,0)); tft.setTextSize(3); tft.setCursor(20, 90); tft.print("ORTALANIYOR");
+    } else if (depState == DEP_LOCKED) {
       int sec = (int)((depLockUntil - millis()) / 1000); if (sec < 0) sec = 0;
       tft.setTextColor(ST77XX_RED); tft.setTextSize(3); tft.setCursor(20, 40); tft.print("KILITLI");
       tft.setTextColor(ST77XX_WHITE); tft.setTextSize(5);
