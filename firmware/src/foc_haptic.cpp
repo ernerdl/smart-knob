@@ -211,9 +211,12 @@ static void applyMode(AppMode m) {
   relAnchor = motor.shaft_angle;                 // goreli referans (ortalama bitince guncellenir)
   updateLED(appMode == APP_VOLUME ? level : dispIdx);
   pendingHid = 0;
-  modeSwitchAt = millis();   // geçiş sonrası HID gonderme (sahte navigasyon yok)
-  centering = true; centerStart = millis();      // motor fiziksel ORTAYA donsun -> iki yone de yer ac
-  Serial.printf("MOD %d -> ORTALAMA basladi (hedef=%.1f deg)\n", (int)m, midA()*180.0f/PI);
+  modeSwitchAt = millis();   // geçiş sonrası kisa guard (sahte navigasyon yok)
+  // ORTALAMA sadece DUVARA YAKINSA (orta bolgedeysen gereksiz -> gecikme olmasin, aninda tepki).
+  float half = (maxA - minA) * 0.5f;
+  centering = (half > 0.15f) && (fabsf(motor.shaft_angle - midA()) > half * 0.55f);
+  centerStart = millis();
+  Serial.printf("MOD %d -> ortalama=%d\n", (int)m, centering ? 1 : 0);
 }
 
 // ---- DEPLOY: yardimcilar ----
@@ -729,7 +732,7 @@ void loop() {
     t -= damping * motor.shaft_velocity;
     bool reached     = fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f;   // ortaya oturdu
     bool pushingAway = (e * motor.shaft_velocity) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
-    if (reached || pushingAway || millis() - centerStart > 1200) {
+    if (reached || pushingAway || millis() - centerStart > 700) {
       centering = false;
       relAnchor = motor.shaft_angle;   // goreli grid'i knob'un su anki yerinden baslat
       Serial.printf("ORTALAMA bitti (%s) aci=%.1f\n",
@@ -756,7 +759,7 @@ void loop() {
     else if (d < -sp * 0.6f) step = -1;
     if (step != 0) {
       relAnchor += step * sp;                             // referansi bir centik kaydir
-      if (millis() - modeSwitchAt > 500) {
+      if (millis() - modeSwitchAt > 150) {
         pendingHid += step; lastUserMove = millis();
         if (barMode()) {                                  // ses/parlaklik: LED bar seviyesi (0..detents-1)
           level = constrain(level + step, 0, detents - 1);
