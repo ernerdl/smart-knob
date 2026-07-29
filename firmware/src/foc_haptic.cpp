@@ -721,15 +721,19 @@ void loop() {
   // Yaklasim: SmartKnob mantigi — KRITIK SONUMLU 2. derece setpoint (S-egrisi, jerk yok) +
   //           motorun setpoint'i takibi + DEAD ZONE (settle buzz'i yok) + VELOCITY CUTOFF (runaway yok).
   float t;
+  // Deploy'dan (herhangi yoldan) cikinca goreli grid'i TAZELE -> bayat referansla jerk/titreme olmasin
+  static DeployState prevDep = DEP_OFF;
+  if (prevDep != DEP_OFF && depState == DEP_OFF) { relAnchor = motor.shaft_angle; centering = false; }
+  prevDep = depState;
   if (depUpdate(t)) {
     // DEPLOY modu (kasa kilidi/kol) -> torku o uretir, normal haptik+HID atlanir
   } else if (fabsf(motor.shaft_velocity) > 40.0f) {   // VELOCITY CUTOFF (SmartKnob): runaway yok
     t = 0;
   } else if (centering) {
-    // MOD GECISI ORTALAMA: sabit hedef=fiziksel orta. NAZIK yay (dusuk V) -> kullanici kolay override eder.
+    // MOD GECISI ORTALAMA: sabit hedef=fiziksel orta. NAZIK yay + GUCLU SONUM (overshoot/titreme YOK).
     float e = motor.shaft_angle - midA();
     t = -Kcenter * e;
-    t -= damping * motor.shaft_velocity;
+    t -= 1.4f * motor.shaft_velocity;   // yuksek sonum: merkezde salinim yapmaz (kritik-ustu sonumlu)
     bool reached     = fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f;   // ortaya oturdu
     bool pushingAway = (e * motor.shaft_velocity) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
     if (reached || pushingAway || millis() - centerStart > 700) {
