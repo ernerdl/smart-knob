@@ -278,8 +278,9 @@ static bool depUpdate(float &t) {
   switch (depState) {
     case DEP_CENTER: {                               // sifre oncesi: knob'u fiziksel ORTAYA al (iki yone yer ac)
       float e = a - midA();
-      t = -Kcenter * e - 1.4f * motor.shaft_velocity;   // guclu sonum -> overshoot yok
-      if ((fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f) || now - depIdleAt > 1500) {
+      t = _constrain(-5.0f * e - 0.35f * motor.shaft_velocity, -2.2f, 2.2f);  // NAZIK + DUSUK sonum -> titremez
+      // yeterince ortada + DURGUN olunca sifreye gec (hareketliyken gecerse sahte tik olur -> kilit)
+      if ((fabsf(e) < 0.13f && fabsf(motor.shaft_velocity) < 0.30f) || now - depIdleAt > 2200) {
         depState = DEP_ENTRY; depResetEntry();       // merkezden basla, tik saymaya gec
       }
       return true;
@@ -743,7 +744,7 @@ void loop() {
     // MOD GECISI ORTALAMA: sabit hedef=fiziksel orta. NAZIK yay + GUCLU SONUM (overshoot/titreme YOK).
     float e = motor.shaft_angle - midA();
     t = -Kcenter * e;
-    t -= 1.4f * motor.shaft_velocity;   // yuksek sonum: merkezde salinim yapmaz (kritik-ustu sonumlu)
+    t -= 0.35f * motor.shaft_velocity;   // DUSUK sonum: gurultu buyutup titretmez (yuksek sonum titreme enjekte eder)
     bool reached     = fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f;   // ortaya oturdu
     bool pushingAway = (e * motor.shaft_velocity) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
     if (reached || pushingAway || millis() - centerStart > 700) {
