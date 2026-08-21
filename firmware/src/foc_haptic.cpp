@@ -121,7 +121,7 @@ private:
 
 MT6701_I2C        sensor = MT6701_I2C(Wire);
 BLDCMotor         motor  = BLDCMotor(MOTOR_POLE_PAIRS);
-BLDCDriver3PWM    driver = BLDCDriver3PWM(PIN_MOTOR_A, PIN_MOTOR_B, PIN_MOTOR_C);
+BLDCDriver3PWM    driver = BLDCDriver3PWM(PIN_MOTOR_A, PIN_MOTOR_B, PIN_MOTOR_C, PIN_MOTOR_EN);
 
 enum Mode { M_FREE, M_DETENT, M_SPRING, M_ENDSTOP };
 Mode  mode    = M_DETENT;
@@ -672,14 +672,14 @@ void setup() {
   motor.linkSensor(&sensor);
 
   driver.voltage_power_supply = MOTOR_SUPPLY_V;   // 12V
-  driver.voltage_limit        = 8.0f;   // align 7V'a izin ver
-  driver.pwm_frequency        = 20000;  // 20kHz: isitilebilir ugultu azalir (L298N icin sinirda, isiyi izle)
+  driver.voltage_limit        = 12.0f;  // L6234 tam beslemeye izin (gercek limit motor.voltage_limit)
+  driver.pwm_frequency        = 20000;  // 20kHz (L6234 limiti 50kHz; dahili 300ns dead-time otomatik)
   if (!driver.init()) { Serial.println("HATA driver.init"); return; }
   motor.linkDriver(&driver);
 
   motor.controller    = MotionControlType::torque;   // tork = voltaj (akim sensoru yok)
-  motor.voltage_limit = 5.0f;                         // haptik tork tavani (L298N dususu icin biraz yuksek)
-  motor.voltage_sensor_align = 7.0f;                  // KALIBRASYON voltaji yuksek: rotor elektriksel sifira SAGLAM otursun (tutarli offset)
+  motor.voltage_limit = 3.0f;                         // L6234 dususu ~0 (1A'de ~1.8V), GBM2804 yuksek direncli -> DUSUK tut
+  motor.voltage_sensor_align = 3.0f;                  // kalibrasyon: L6234'te 3V rotoru elektriksel sifira oturtmaya yeter
   motor.velocity_limit = 100;
   motor.LPF_velocity.Tf = 0.03f;                      // hiz LPF: damping'i temizler (titreme->salinim yerine duz)
   motor.useMonitoring(Serial);                        // initFOC ayrintilarini goster
