@@ -689,8 +689,8 @@ void setup() {
   motor.linkDriver(&driver);
 
   motor.controller    = MotionControlType::torque;   // tork = voltaj (akim sensoru yok)
-  motor.voltage_limit = 4.0f;                         // L6234 ~1.8V dususu -> efektif ~2.2V centik; runtime 'v' ile ayarla
-  motor.voltage_sensor_align = 5.0f;                  // L6234 ~1.8V dususu var -> efektif ~3-4V, motoru oynatmaya yeter
+  motor.voltage_limit = 6.0f;                         // GUCLU centik (L298N 5'ti + L6234 dususu az); runtime 'v' ile ayarla/isiyi izle
+  motor.voltage_sensor_align = 7.0f;                  // TAM guc kalibrasyon (L298N'de calisan deger; motoru kesin oynatir)
   motor.velocity_limit = 100;
   motor.LPF_velocity.Tf = 0.03f;                      // hiz LPF: damping'i temizler (titreme->salinim yerine duz)
   motor.useMonitoring(Serial);                        // initFOC ayrintilarini goster
