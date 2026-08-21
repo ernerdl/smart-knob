@@ -689,8 +689,8 @@ void setup() {
   motor.linkDriver(&driver);
 
   motor.controller    = MotionControlType::torque;   // tork = voltaj (akim sensoru yok)
-  motor.voltage_limit = 3.0f;                         // L6234 dususu ~0 (1A'de ~1.8V), GBM2804 yuksek direncli -> DUSUK tut
-  motor.voltage_sensor_align = 2.5f;                  // L6234 tam voltaj -> NAZIK kalibrasyon (overshoot=yanlis pp/hizalama)
+  motor.voltage_limit = 4.0f;                         // L6234 ~1.8V dususu -> efektif ~2.2V centik; runtime 'v' ile ayarla
+  motor.voltage_sensor_align = 5.0f;                  // L6234 ~1.8V dususu var -> efektif ~3-4V, motoru oynatmaya yeter
   motor.velocity_limit = 100;
   motor.LPF_velocity.Tf = 0.03f;                      // hiz LPF: damping'i temizler (titreme->salinim yerine duz)
   motor.useMonitoring(Serial);                        // initFOC ayrintilarini goster
