@@ -61,7 +61,6 @@ static bool forcing = false;      // ARTIK KULLANILMIYOR (sync motoru surmez) �
 // HERSEY GORELI: motor mutlak konuma zorlanmaz, hareket delta'sindan adim uretir.
 static float relAnchor = 0;       // son islenmis centik merkezi (goreli grid referansi)
 static int   dispIdx = 0;         // LED'de gosterilen aktif index (HS'ten SP/TAB ile gelir; KOZMETIK)
-static int   stepSign = 1;        // HID/LED yon isareti (F komutu -1/+1 ceviririr — L6234 faz yonu icin)
 static float volSpacing = 0.15f;  // VOLUME goreli centik araligi (~8.6°; 16 adim ~137° < 300° -> fiziksel araliga sigar)
 // MOD GECISI ORTALAMA: mod degisince motor bir kerelik fiziksel ORTAYA doner -> iki yone de yer acilir.
 // SABIT hedefe (orta) gider, DEGERE degil -> kovalanan hareketli hedef yok, forcing gibi savasamaz.
@@ -122,7 +121,7 @@ private:
 
 MT6701_I2C        sensor = MT6701_I2C(Wire);
 BLDCMotor         motor  = BLDCMotor(MOTOR_POLE_PAIRS);
-BLDCDriver3PWM    driver = BLDCDriver3PWM(PIN_MOTOR_A, PIN_MOTOR_B, PIN_MOTOR_C, PIN_MOTOR_EN);
+BLDCDriver3PWM    driver = BLDCDriver3PWM(PIN_MOTOR_A, PIN_MOTOR_B, PIN_MOTOR_C);
 
 enum Mode { M_FREE, M_DETENT, M_SPRING, M_ENDSTOP };
 Mode  mode    = M_DETENT;
@@ -496,7 +495,6 @@ static void handleLine(String s) {
   else if (c=='f') { motor.LPF_velocity.Tf = v.toFloat(); Serial.printf("LPF_Tf=%.3f\n", motor.LPF_velocity.Tf); }
   else if (c=='S') { stream = !stream; Serial.printf("stream=%d\n", stream); }
   else if (c=='D') { dbgStep = !dbgStep; Serial.printf("dbgStep=%d\n", dbgStep); }
-  else if (c=='F') { stepSign = -stepSign; Serial.printf("stepSign=%d (yon ters cevrildi)\n", stepSign); }
   else if (c=='H') { home(); }
   else if (c=='L') { fill_solid(leds, NLED, CRGB(120,120,120)); FastLED.show(); Serial.println("LED test: hepsi beyaz"); }
   else if (c=='w') { wallMargin = v.toFloat() * PI / 180.0f; Serial.printf("wallMargin=%.1f deg\n", wallMargin*180.0f/PI); }
@@ -650,11 +648,6 @@ void setup() {
   Serial.begin(115200);
   delay(800);
 
-  // USB'yi EN BASTA baslat -> driver/FOC patlasa/erken-return etse bile SERIAL yasar (debug icin sart)
-  Consumer.begin(); Keyboard.begin(); Mouse.begin();
-  USB.begin();
-  delay(300);
-
   // FastLED'i USB/FOC'tan ONCE baslat
   FastLED.addLeds<WS2812B, PIN_RGB, GRB>(leds, NLED);
   FastLED.setBrightness(50);
@@ -679,18 +672,14 @@ void setup() {
   motor.linkSensor(&sensor);
 
   driver.voltage_power_supply = MOTOR_SUPPLY_V;   // 12V
-  driver.voltage_limit        = 12.0f;  // L6234 tam beslemeye izin (gercek limit motor.voltage_limit)
-  driver.pwm_frequency        = 20000;  // 20kHz (L6234 limiti 50kHz; dahili 300ns dead-time otomatik)
+  driver.voltage_limit        = 8.0f;   // align 7V'a izin ver
+  driver.pwm_frequency        = 20000;  // 20kHz: isitilebilir ugultu azalir (L298N icin sinirda, isiyi izle)
   if (!driver.init()) { Serial.println("HATA driver.init"); return; }
-  // L6234 EN'i ACIKCA HIGH sur (SimpleFOC enable'ina guvenme) -> initFOC sirasinda surucu kesin acik
-  pinMode(PIN_MOTOR_EN, OUTPUT); digitalWrite(PIN_MOTOR_EN, HIGH);
-  driver.enable();
-  Serial.printf("EN pin %d -> HIGH (surucu enable)\n", PIN_MOTOR_EN);
   motor.linkDriver(&driver);
 
   motor.controller    = MotionControlType::torque;   // tork = voltaj (akim sensoru yok)
-  motor.voltage_limit = 6.0f;                         // GUCLU centik (L298N 5'ti + L6234 dususu az); runtime 'v' ile ayarla/isiyi izle
-  motor.voltage_sensor_align = 7.0f;                  // TAM guc kalibrasyon (L298N'de calisan deger; motoru kesin oynatir)
+  motor.voltage_limit = 5.0f;                         // haptik tork tavani (L298N dususu icin biraz yuksek)
+  motor.voltage_sensor_align = 7.0f;                  // KALIBRASYON voltaji yuksek: rotor elektriksel sifira SAGLAM otursun (tutarli offset)
   motor.velocity_limit = 100;
   motor.LPF_velocity.Tf = 0.03f;                      // hiz LPF: damping'i temizler (titreme->salinim yerine duz)
   motor.useMonitoring(Serial);                        // initFOC ayrintilarini goster
@@ -711,7 +700,11 @@ void setup() {
   bool pcf = (Wire1.endTransmission() == 0);
   if (pcf) { Wire1.beginTransmission(0x20); Wire1.write(0xFF); Wire1.endTransmission(); }  // hepsi giris
   Serial.printf("PCF8574 (0x20): %s\n", pcf ? "VAR — herhangi butona bas = mod degistir" : "yok");
-  // (USB/HID yukarida, setup basinda baslatildi)
+
+  Consumer.begin();   // native USB HID (ses tusu)
+  Keyboard.begin();   // klavye (Ctrl+ok = masaustu gecis)
+  Mouse.begin();      // fare tekeri (scroll modu)
+  USB.begin();
 
   level = detentIndex(motor.shaft_angle);   // baslangic seviyesi mevcut konumdan
   updateLED(level);
@@ -780,18 +773,17 @@ void loop() {
     if (d >  sp * 0.6f) step = +1;
     else if (d < -sp * 0.6f) step = -1;
     if (step != 0) {
-      relAnchor += step * sp;                             // referansi bir centik kaydir (FIZIKSEL, flip'lenmez)
-      int hstep = step * stepSign;                        // HID/LED yonu (F komutuyla ters cevrilir)
+      relAnchor += step * sp;                             // referansi bir centik kaydir
       if (millis() - modeSwitchAt > 150) {
-        pendingHid += hstep; lastUserMove = millis();
+        pendingHid += step; lastUserMove = millis();
         if (barMode()) {                                  // ses/parlaklik: LED bar seviyesi (0..detents-1)
-          level = constrain(level + hstep, 0, detents - 1);
+          level = constrain(level + step, 0, detents - 1);
           updateLED(level);
         } else if (appMode == APP_SCROLL) {               // scroll: donen nokta (wrap)
-          dispIdx = (dispIdx + hstep + NLED) % NLED;
+          dispIdx = (dispIdx + step + NLED) % NLED;
           updateLED(dispIdx);
         } else {                                          // space/tabs: aktif index (iyimser; HS teyit eder)
-          dispIdx = constrain(dispIdx + hstep, 0, detents - 1);
+          dispIdx = constrain(dispIdx + step, 0, detents - 1);
           updateLED(dispIdx);
         }
       }

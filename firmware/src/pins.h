@@ -6,16 +6,25 @@
 // Hepsi SOL sirada, bitisik ve derli toplu (bkz docs/01_pinout.md fiziksel harita)
 // SOL sira: 3V3 3V3 RST | 4 5 6 7 15 16 17 18 8 3 46 9 10 11 12 13 14 | 5V GND
 
-// --- Motor (L6234D, 3PWM + enable) — 3 pin YAN YANA ---
-#define PIN_MOTOR_A   15   // GPIO15 -> L6234 IN1 (ped7)
-#define PIN_MOTOR_B   16   // GPIO16 -> L6234 IN2 (ped4)
-#define PIN_MOTOR_C   17   // GPIO17 -> L6234 IN3 (ped14)
-#define PIN_MOTOR_EN  21   // GPIO21 -> L6234 EN1/EN2/EN3 (birlesik) + 10k PULL-DOWN GND'ye (boot-safe)
-// Motor fazlari OUT1/2/3 (ped6/5/15). SENSE1/2 -> GND (akim algilama yok, gerilim kipi).
+// --- Motor (L298N, 3PWM) — 3 pin YAN YANA ---
+#ifndef PIN_MOTOR_A
+#define PIN_MOTOR_A   15   // GPIO15 -> L298N IN1 (phase U)
+#endif
+#ifndef PIN_MOTOR_B
+#define PIN_MOTOR_B   16   // GPIO16 -> L298N IN2 (phase V)
+#endif
+#ifndef PIN_MOTOR_C
+#define PIN_MOTOR_C   17   // GPIO17 -> L298N IN3 (phase W)
+#endif
+// L298N ENA + ENB -> sabit HIGH. IN4 kullanilmaz. Motor OUT1/2/3.
 
 // --- Sensor + butonlar (I2C, ortak hat) — SDA/SCL yan yana ---
+#ifndef PIN_I2C_SDA
 #define PIN_I2C_SDA   5    // GPIO5  -> AS5600 SDA + PCF8574 SDA
+#endif
+#ifndef PIN_I2C_SCL
 #define PIN_I2C_SCL   6    // GPIO6  -> AS5600 SCL + PCF8574 SCL
+#endif
 // AS5600 adres 0x36 | PCF8574 buton 0x20..0x27
 // !!! AS5600 3V3'ten beslensin (ust SOL 3V3 pini) — 5V YAKAR !!!
 

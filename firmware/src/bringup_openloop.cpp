@@ -79,14 +79,28 @@ void setup() {
   printStatus();
 }
 
+// GUVENLIK: komut gelmezse motoru kes (donmeyen motor akim cekip ISINIR — motor yakmayalim)
+static uint32_t lastCmdMs = 0;
+static const uint32_t AUTO_STOP_MS = 4000;   // 4sn komut yoksa dur
+static bool autoStopped = false;
+
 void loop() {
+  // GUVENLIK: son komuttan 4sn sonra otomatik dur (motor isinmasin)
+  if (target != 0 && millis() - lastCmdMs > AUTO_STOP_MS) {
+    target = 0; motor.disable(); autoStopped = true;
+    Serial.println("!! OTO-STOP (4sn komut yok) — motor kesildi, isinmasin");
+  }
   // FOC open-loop: her dongude cagrilmali, bloklanmamali
   motor.move(target);
 
   // Serial komutlari
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == '\n' || c == '\r') { handleLine(rx); rx = ""; }
+    if (c == '\n' || c == '\r') {
+      handleLine(rx); rx = "";
+      lastCmdMs = millis();
+      if (autoStopped && target != 0) { motor.enable(); autoStopped = false; }
+    }
     else { rx += c; if (rx.length() > 40) rx = ""; }
   }
 }
