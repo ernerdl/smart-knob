@@ -168,7 +168,13 @@ float Kwall   = 40.0f;   // duvar (sert)
 float damping = 0.15f;   // hiz sonumleme — DUSUK TUT. Olculdu: 0.15->2 cirpinti, 0.35->14, 0.55->47.
                          // Hiz tahmini gecikmeli oldugu icin yuksek sonum titremeyi SONDURMEZ, BESLER.
 float minA = 0, maxA = 1.0f;   // FIZIKSEL duvar acilari (homing ile bulunur)
+bool  homed = false;           // homing yapildi mi? Bootta YAPILMIYOR: duvara dayanmak stall = guc
+                               // kaynagi CC'ye giriyor + motor isiniyor. Gunluk kullanim (ses/space/
+                               // scroll) goreli grid kullandigi icin duvarlari BILMEK ZORUNDA DEGIL.
+                               // Sadece deploy modu duvarlara ihtiyac duyar -> ilk girişte yapilir.
 float homingV = 4.5f;    // homing itme voltaji (nazik — duvara sert vurmasin)
+float vHalf   = 1.2f;    // sonum devreye girme hizi (rad/s). |v|<<vHalf -> sonum ~0 (durakta vizilti yok)
+                         // |v|>>vHalf -> tam sonum (cevirip birakinca cinlamayi yutar)
 float deadZone = 0.012f; // ~0.7 deg olu bolge — L6234'un kaba minimum torku burada devreye girmesin
 float wallMargin = 0.14f;// duvar ihtiyat payi (rad ~8°): centikler bu payin ICINE yayilir
 
@@ -262,8 +268,10 @@ static void depResetEntry() {
   depDigit = 0; depCount = 0; depDir = 0; depFirstDir = 0;
   depAnchor = motor.shaft_angle; depLastTick = 0; depIdleAt = millis();
 }
+static void home();   // ileri bildirim (tembel homing)
 static void depEnter() {                       // P2 -> kasa moduna gir
   if (millis() < depLockUntil) { depState = DEP_LOCKED; return; }
+  if (!homed) home();                          // TEMBEL homing: duvarlar sadece deploy icin gerekli
   depState = DEP_CENTER; depStatus[0] = 0; depIdleAt = millis();   // once ORTALA -> sifre tiklarina iki yone yer
 }
 static void depWrong() {                       // yanlis hane -> titret, 3 hatada kilitle
@@ -399,9 +407,25 @@ static float hapticTorque(float a) {
   return 0;   // M_ENDSTOP/diger: serbest
 }
 
+// FOC dongu periyodu. 0 = maksimum hiz (~9600 Hz).
+// DIKKAT: cok hizli dongu hiz tahminini GURULTULENDIRIR — hiz = daci/dt, dt kuculdukce
+// sensorun tek bit adimi (14 bit) buyuk hiz sicramasi gibi gorunur. Sonum bunu torka cevirir.
+static volatile uint32_t focPeriodUs = 0;    // 0 = sinirlama yok (eski davranis)
+static volatile float    kickDir   = 1.0f; // tekme yonu (baslangicta bir kez sabitlenir)
+static volatile uint32_t kickUntil = 0;   // 'K' testi: rotoru dur, salinim sonme suresini olc
 static volatile uint32_t focIters = 0;   // FOC dongu sayaci (hiz olcumu icin)
 static void focPause();   // FOC gorevini duraklat (asagida tanimli)
 static void focResume();  // ve devam ettir
+
+
+// Hiza bagli sonum: durakta ~0, harekette tam.
+// Neden: SABIT sonum iki isi ayni anda yapamiyor — cinlamayi yutacak kadar buyutunce
+// durakta gurultuyu buyutup vizildatiyor (olculdu: b0.6 -> 3.7sn cinlama, b1.0 -> 142 yon degisimi).
+// Bu form dissipasyonu sadece gercek hareket varken uyguluyor.
+static inline float dampTorque(float vel) {
+  float av = fabsf(vel);
+  return damping * vel * (av / (av + vHalf));
+}
 
 // --- HOMING: fiziksel duvarlari bul (HIZ-SINIRLI yaklasim -> duvara NAZIK dayanir, slam yok) ---
 static void findWall(int dir, float &out) {
@@ -428,7 +452,7 @@ static void home() {
   findWall(+1, w1); delay(150);
   findWall(-1, w2); delay(150);
   motor.move(0);
-  minA = fmin(w1, w2); maxA = fmax(w1, w2);
+  minA = fmin(w1, w2); maxA = fmax(w1, w2); homed = true;
   Serial.printf("Homing bitti: min=%.1f max=%.1f aralik=%.1f deg\n",
                 minA*180.0f/PI, maxA*180.0f/PI, (maxA-minA)*180.0f/PI);
 }
@@ -567,6 +591,14 @@ static void handleLine(String s) {
   }
   else if (c=='C') { Serial.printf("CRC: toplam=%lu bozuk=%lu (%%%.2f)  kayma=%d  alan=%u\n", sensor.total, sensor.bad, sensor.total?100.0*sensor.bad/sensor.total:0.0, sensor.shift, sensor.mgStatus); sensor.total=sensor.bad=0; }
   else if (c=='I') { sensor.update(); Serial.printf("SENSOR aci=%.2f rad (%.1f deg)\n", sensor.getAngle(), sensor.getAngle()*180.0f/PI); }
+  else if (c=='T') { focPeriodUs = v.toInt(); Serial.printf("focPeriod=%lu us (%s)\n", (unsigned long)focPeriodUs, focPeriodUs ? String(1000000.0f/focPeriodUs,0).c_str() : "max"); }
+  else if (c=='V') { vHalf = v.toFloat(); Serial.printf("vHalf=%.2f rad/s\n", vHalf); }
+  else if (c=='K') {   // TEKME testi: duvardan uzaga sabit darbe, sonra serbest birak
+    relAnchor = motor.shaft_angle;
+    kickDir   = (motor.shaft_angle > midA()) ? -1.0f : 1.0f;   // yon BIR KEZ sabitlenir
+    kickUntil = millis() + (v.length() ? v.toInt() : 60);
+    Serial.printf("KICK yon=%+.0f\n", kickDir);
+  }
   else if (c=='R') {   // FOC dongu hizi (Hz) — 500ms ornek
     uint32_t n0 = focIters, t0 = millis();
     delay(500);
@@ -695,6 +727,9 @@ static void doAction(uint8_t act) {
 // Neden: ekran SPI'i, HID, buton okumasi ve seri yazdirma FOC'un arasina girince
 // hiz tahmini gecikiyor ve sonum titreme enjekte ediyor. FOC'u ayirinca
 // donguyu hicbir sey bolmuyor. (Orijinal SmartKnob de boyle yapiyor.)
+// FOC ayri cekirdekte mi? 0 = ESKI davranis (loop() icinde, kanitlanmis his).
+// 1 = core 0'da ayri gorev. Deney: ayri cekirdek + yuksek dongu hizi TITREME getirdi.
+#define FOC_SEPARATE_CORE 0
 static TaskHandle_t   focTaskH = NULL;
 static volatile bool  focRun   = true;    // false -> gorev duraklar
 static volatile bool  focIdle  = false;   // gorev gercekten durakladi mi
@@ -710,12 +745,20 @@ static void focResume() {
   focRun = true;
 }
 
-static void focTask(void *pv) {
-  for (;;) {
-    if (!focRun) { focIdle = true; vTaskDelay(1); continue; }
-    focIdle = false;
+static void focStep() {
+    if (focPeriodUs) {                       // sabit periyot: duzenli dt -> temiz hiz tahmini
+      static uint32_t nextUs = 0;
+      uint32_t now = micros();
+      if ((int32_t)(nextUs - now) > 0) return;
+      nextUs = now + focPeriodUs;
+    }
     focIters++;
     motor.loopFOC();
+    if (millis() < kickUntil) {   // TEKME: sabit tork darbesi, sonra birak
+      lastT = kickDir * motor.voltage_limit;
+      motor.move(lastT);
+      return;
+    }
   // --- tork: normal haptik VEYA Mac senkronu (zorla-git) ---
     // Yaklasim: SmartKnob mantigi — KRITIK SONUMLU 2. derece setpoint (S-egrisi, jerk yok) +
     //           motorun setpoint'i takibi + DEAD ZONE (settle buzz'i yok) + VELOCITY CUTOFF (runaway yok).
@@ -744,11 +787,18 @@ static void focTask(void *pv) {
     } else {
       // TEK yol: yerel deterministik haptik. Sync ARTIK motoru surmez -> titreme/atlama yok.
       t = hapticTorque(motor.shaft_angle);
-      t -= damping * motor.shaft_velocity;
+      t -= dampTorque(motor.shaft_velocity);
     }
     float vmax = centering ? 2.5f : motor.voltage_limit;   // ortalama NAZIK (dusuk V, savasamaz)
     lastT = _constrain(t, -vmax, vmax);
     motor.move(lastT);
+}
+
+static void focTask(void *pv) {
+  for (;;) {
+    if (!focRun) { focIdle = true; vTaskDelay(1); continue; }
+    focIdle = false;
+    focStep();
   }
 }
 
@@ -797,7 +847,11 @@ void setup() {
   Serial.printf("initFOC bitti. zero_offset=%.3f dir=%d  (sabit kod icin not al)\n",
                 motor.zero_electric_angle, motor.sensor_direction);
 
-  home();   // fiziksel duvarlari bul -> centikler bu aralaga yayilir
+  // Bootta homing YOK (stall = CC + isinma). Nominal aralik: olculen ~318 derece, mevcut konum ortada varsayilir.
+  // Gercek duvarlar ilk deploy girisinde (veya 'H' komutuyla) bulunur.
+  { float a0 = motor.shaft_angle, half = 159.0f * PI / 180.0f;
+    minA = a0 - half; maxA = a0 + half;
+    Serial.println("Homing ATLANDI (bootta stall yok). Deploy'a girince veya 'H' ile yapilir."); }
 
   // PCF8574 buton genisletici (I2C1 AYRI bus, AS5600'u yavaslatmaz)
   Wire1.begin(PIN_I2C1_SDA, PIN_I2C1_SCL, 100000);
@@ -819,16 +873,25 @@ void setup() {
   tftSPI.begin(PIN_TFT_SCK, -1, PIN_TFT_MOSI, PIN_TFT_CS);
   tft.init(240, 320); tft.setRotation(3);   // YATAY (landscape, 180 donuk) -> 320x240
   drawScreen();
-  xTaskCreatePinnedToCore(displayTask, "disp", 4096, NULL, 1, NULL, 1);   // ekran: core 1 (loop ile birlikte)
+  xTaskCreatePinnedToCore(displayTask, "disp", 4096, NULL, 1, NULL, FOC_SEPARATE_CORE ? 1 : 0);
 
   // FOC: core 0'da tek basina, yuksek oncelik. Tight loop oldugu icin core 0 WDT kapali.
+#if FOC_SEPARATE_CORE
   disableCore0WDT();
+#endif
+#if FOC_SEPARATE_CORE
   xTaskCreatePinnedToCore(focTask, "foc", 4096, NULL, 5, &focTaskH, 0);
+#else
+  (void)focTask;   // loop() icinden focStep() cagriliyor
+#endif
 
   Serial.println("HAZIR. Komut: v m d k b f H S VOL<n> ?  | HID+LED+Mac senkron");
 }
 
 void loop() {
+#if !FOC_SEPARATE_CORE
+  focStep();
+#endif
 
   // Aciliste bir kez: HS'e "volume modu" bildir (F16) -> HS guncel Mac sesini yollar (boot sync)
   static bool bootSynced = false;
