@@ -843,7 +843,19 @@ void setup() {
   // 5V idi: bootta 1-2sn boyunca motora DC basip guc kaynagini CC'ye sokuyordu.
   motor.voltage_sensor_align = 1.0f;
   motor.velocity_limit = 100;
-  motor.LPF_velocity.Tf = 0.03f;                      // hiz LPF: damping'i temizler (titreme->salinim yerine duz)
+  // --- Hiz tahmini (27.08 arastirma sonrasi) ---
+  // 1) min_elapsed_time: SimpleFOC Sensor::getVelocity() icinde
+  //      if (Ts < min_elapsed_time) return velocity;   // ESKI degeri dondurur
+  //    Varsayilan 100us. 9600 Hz dongude periyot 104us -> tam sinirda; bazi turlarda
+  //    100us'nin altina dusup BAYAT hiz donuyordu. 500us'ye cekince hem tuzak kapaniyor
+  //    hem hiz daha uzun pencerede hesaplanip kuantizasyon gurultusu ~5 kat azaliyor.
+  //    (14 bit -> 1 bit adimi = 2pi/16384 = 3.83e-4 rad; hiz kuantumu = adim/pencere)
+  sensor.min_elapsed_time = 0.0005f;
+  // 2) Tf: 0.03s -> kesim 5.3 Hz, ~30ms faz gecikmesi. Gecikmis hiz ile yapilan sonum
+  //    enerji sondurmek yerine enjekte ediyor. 0.01s -> kesim 16 Hz, ~10ms.
+  //    Pasiflik acisindan guvenli: voltaj biriminde b_elektriksel ~= Ke (0.04-0.07),
+  //    gereken ise KT/2 + B*T/(2Tf+T) ~= 0.003 -> hala 15+ kat marj.
+  motor.LPF_velocity.Tf = 0.01f;
   motor.useMonitoring(Serial);                        // initFOC ayrintilarini goster
   motor.init();
 
