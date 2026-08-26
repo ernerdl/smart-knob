@@ -23,6 +23,7 @@
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
+#include "MagneticSensorMT6701SSI.h"
 #include "pins.h"
 
 #define NLED 16
@@ -89,49 +90,86 @@ static uint32_t forceStart = 0;   // forcing timeout icin
 static int pendingHid = 0;        // gonderilecek net adim (cok-adimli)
 static uint32_t lastUserMove = 0; // kullanici en son ne zaman cevirdi (VOL fighting engelle)
 static uint32_t nextStepAt = 0;   // adimlar arasi min bekleme (spaces'te Mission Control yetissin)
-static uint32_t modeSwitchAt = 0; // mod degisiminden sonra kisa guard (aci oynamasi HID'e cevrilmesin)
+static uint32_t modeSwitchAt = 0;
+static bool pcfPresent = false;   // PCF8574 yoksa I2C'yi hic yoklama (hata spam'i seri portu boguyordu) // mod degisiminden sonra kisa guard (aci oynamasi HID'e cevrilmesin)
 
-// MT6701 14-bit manyetik aci sensoru (I2C 0x06, reg 0x03=Angle[13:6], 0x04=Angle[5:0]<<2)
-// AS5600 yerine — 14-bit (4x cozunurluk), daha saglam. SimpleFOC Sensor tabanindan turuyor.
-class MT6701_I2C : public Sensor {
+// MT6701 — SSI (SPI benzeri) arayuz. I2C'den ~20x HIZLI okuma -> FOC dongusu hizlanir,
+// yuksek centik sertliginde kararsizlik (salinim) kalkar. Kablolar ayni: A=DO, B=CLK, Z=CSN.
+SPIClass sensorSPI(FSPI);                       // ekran HSPI'de, sensore ayri bus
+
+// MT6701 SSI + CRC DOGRULAMA
+// Datasheet: 24-bit cerceve = 14-bit aci | 4-bit alan durumu | 6-bit CRC (X^6+X+1).
+// Kullandigimiz hazir surucu CRC'yi ATIYORDU. Motor EMI'si okumalari bozunca FOC yanlis
+// tork uygulayip saccmaliyordu (olculdu: motor kapali 0 sicrama, acik 672).
+// Artik her cerceve CRC ile dogrulaniyor; bozuksa REDDEDILIP son gecerli aci korunuyor.
+class MT6701SSI_CRC : public Sensor {
 public:
-  MT6701_I2C(TwoWire& w, uint8_t addr = 0x06) : _wire(&w), _addr(addr) {}
-  void init(TwoWire* w = nullptr) { if (w) _wire = w; this->Sensor::init(); }
+  MT6701SSI_CRC(int cs) : _cs(cs) {}
+  void init(SPIClass* spi) {
+    _spi = spi;
+    pinMode(_cs, OUTPUT); digitalWrite(_cs, HIGH);
+    this->Sensor::init();
+  }
   float getSensorAngle() override {
-    _wire->beginTransmission(_addr);
-    _wire->write((uint8_t)0x03);
-    if (_wire->endTransmission(false) != 0) return _last;   // I2C hata: son degeri koru
-    _wire->requestFrom(_addr, (uint8_t)2);
-    if (_wire->available() < 2) return _last;
-    uint16_t hi = _wire->read(), lo = _wire->read();
-    int raw = (hi << 6) | (lo >> 2);                        // 14-bit (0..16383)
-    // GLITCH FILTRESI: bir okumada >~9° (400 count) sicrama fiziksel imkansiz (kHz'de) -> bozuk I2C, REDDET.
-    // wrap-aware fark. Ard arda 3 kez farkli okursa GERCEK hareket kabul et (takilma yok).
-    int d = raw - _lastRaw;
-    if (d > 8192) d -= 16384; else if (d < -8192) d += 16384;
-    if (_lastRaw >= 0 && abs(d) > 400 && _reject < 3) { _reject++; return _last; }
-    _reject = 0; _lastRaw = raw;
-    _last = (float)raw / 16384.0f * _2PI;
+    _spi->beginTransaction(_set);
+    digitalWrite(_cs, LOW);
+    uint8_t b0=_spi->transfer(0), b1=_spi->transfer(0), b2=_spi->transfer(0), b3=_spi->transfer(0);
+    digitalWrite(_cs, HIGH);
+    _spi->endTransaction();
+    uint32_t f = ((uint32_t)b0<<24)|((uint32_t)b1<<16)|((uint32_t)b2<<8)|b3;
+    total++;
+    // Cerceve basindaki onek bit sayisi bilinmiyor -> CRC'yi tutturan kaymayi OTOMATIK bul, sonra kilitle.
+    if (shift < 0) {
+      for (int L = 0; L <= 8; L++) {
+        uint16_t a =(f >> (18-L)) & 0x3FFF;
+        uint8_t  m =(f >> (14-L)) & 0x0F;
+        uint8_t  c =(f >> (8-L))  & 0x3F;
+        if (crc6((((uint32_t)a)<<4)|m) == c) { shift = L; break; }
+      }
+      if (shift < 0) { bad++; return _last; }
+    }
+    uint16_t ang =(f >> (18-shift)) & 0x3FFF;
+    uint8_t  mg  =(f >> (14-shift)) & 0x0F;
+    uint8_t  crcR=(f >> (8-shift))  & 0x3F;
+    if (crc6((((uint32_t)ang)<<4)|mg) != crcR) { bad++; return _last; }
+    _last = (float)ang / 16384.0f * _2PI;
+    mgStatus = mg;
     return _last;
   }
+  int shift = -1;
+  uint32_t total = 0, bad = 0;
+  uint8_t  mgStatus = 0;
 private:
-  TwoWire* _wire; uint8_t _addr; float _last = 0.0f;
-  int _lastRaw = -1, _reject = 0;
+  static uint8_t crc6(uint32_t d18) {          // X^6+X+1, MSB first, 18 bit
+    uint8_t c = 0;
+    for (int i = 17; i >= 0; i--) {
+      uint8_t inb = (d18 >> i) & 1, msb = (c >> 5) & 1;
+      c = (uint8_t)((c << 1) & 0x3F);
+      if (inb ^ msb) c ^= 0x03;
+    }
+    return c;
+  }
+  SPIClass* _spi = nullptr;
+  SPISettings _set = SPISettings(500000, MSBFIRST, SPI_MODE2);
+  int _cs; float _last = 0;
 };
 
-MT6701_I2C        sensor = MT6701_I2C(Wire);
+MT6701SSI_CRC sensor(PIN_MT_CSN);
+
 BLDCMotor         motor  = BLDCMotor(MOTOR_POLE_PAIRS);
 BLDCDriver3PWM    driver = BLDCDriver3PWM(PIN_MOTOR_A, PIN_MOTOR_B, PIN_MOTOR_C);
 
 enum Mode { M_FREE, M_DETENT, M_SPRING, M_ENDSTOP };
-Mode  mode    = M_DETENT;
+Mode  mode    = M_DETENT;   // acilista centik (sabit kalibrasyon guvenilir) — 'm detent' ile centikleri ac (titreme USB'yi dusurmesin)
 int   detents = 17;      // 17 pozisyon = 0..16 ses seviyesi (16 kademe gecisi = macOS)
-float Kdet    = 22.0f;   // centik sertligi
+float Kdet    = 22.0f;   // centik sertligi (26.08 olcumlu ayar)
 float Kspring = 8.0f;    // yay
 float Kwall   = 40.0f;   // duvar (sert)
-float damping = 0.30f;   // hiz sonumleme (FILTRELI hizla)
+float damping = 0.15f;   // hiz sonumleme — DUSUK TUT. Olculdu: 0.15->2 cirpinti, 0.35->14, 0.55->47.
+                         // Hiz tahmini gecikmeli oldugu icin yuksek sonum titremeyi SONDURMEZ, BESLER.
 float minA = 0, maxA = 1.0f;   // FIZIKSEL duvar acilari (homing ile bulunur)
-float homingV = 2.2f;    // homing itme voltaji (nazik — duvara sert vurmasin)
+float homingV = 4.5f;    // homing itme voltaji (nazik — duvara sert vurmasin)
+float deadZone = 0.012f; // ~0.7 deg olu bolge — L6234'un kaba minimum torku burada devreye girmesin
 float wallMargin = 0.14f;// duvar ihtiyat payi (rad ~8°): centikler bu payin ICINE yayilir
 
 // seviye <-> aci + LED yardimcilari
@@ -350,11 +388,20 @@ static float hapticTorque(float a) {
   if (mode == M_DETENT) {
     float sp = detentSpacing();
     float c  = relAnchor + roundf((a - relAnchor) / sp) * sp;
-    return -Kdet * (a - c);
+    float e  = a - c;
+    // OLU BOLGE: centik merkezine cok yakinken tork UYGULAMA. Merkez etrafindaki
+    // mikro-salinimi (parmakla supururken sekme) kokten keser. 'z' ile ayarlanir.
+    if (fabsf(e) < deadZone) return 0;
+    e -= (e > 0 ? deadZone : -deadZone);     // surekli gecis (sicrama yok)
+    return -Kdet * e;
   }
   if (mode == M_SPRING) return -Kspring * (a - 0.5f * (minA + maxA));
   return 0;   // M_ENDSTOP/diger: serbest
 }
+
+static volatile uint32_t focIters = 0;   // FOC dongu sayaci (hiz olcumu icin)
+static void focPause();   // FOC gorevini duraklat (asagida tanimli)
+static void focResume();  // ve devam ettir
 
 // --- HOMING: fiziksel duvarlari bul (HIZ-SINIRLI yaklasim -> duvara NAZIK dayanir, slam yok) ---
 static void findWall(int dir, float &out) {
@@ -492,10 +539,12 @@ static void handleLine(String s) {
   else if (c=='d') { detents = max(1, (int)v.toInt()); Serial.printf("detents=%d\n", detents); }
   else if (c=='k') { Kdet = v.toFloat(); Serial.printf("Kdet=%.2f\n", Kdet); }
   else if (c=='b') { damping = v.toFloat(); Serial.printf("damping=%.3f\n", damping); }
+  else if (c=='z') { deadZone = v.toFloat(); Serial.printf("deadZone=%.4f rad (%.2f deg)\n", deadZone, deadZone*180.0f/PI); }
+  else if (c=='h') { homingV = v.toFloat(); Serial.printf("homingV=%.2f\n", homingV); }
   else if (c=='f') { motor.LPF_velocity.Tf = v.toFloat(); Serial.printf("LPF_Tf=%.3f\n", motor.LPF_velocity.Tf); }
   else if (c=='S') { stream = !stream; Serial.printf("stream=%d\n", stream); }
   else if (c=='D') { dbgStep = !dbgStep; Serial.printf("dbgStep=%d\n", dbgStep); }
-  else if (c=='H') { home(); }
+  else if (c=='H') { focPause(); home(); focResume(); }
   else if (c=='L') { fill_solid(leds, NLED, CRGB(120,120,120)); FastLED.show(); Serial.println("LED test: hepsi beyaz"); }
   else if (c=='w') { wallMargin = v.toFloat() * PI / 180.0f; Serial.printf("wallMargin=%.1f deg\n", wallMargin*180.0f/PI); }
   else if (c=='W') { Kwall = v.toFloat(); Serial.printf("Kwall=%.1f\n", Kwall); }
@@ -504,9 +553,11 @@ static void handleLine(String s) {
     if (pp > 0) {
       motor.pole_pairs = pp;
       Serial.printf("pole_pairs=%d -> re-initFOC...\n", pp);
+      focPause();
       motor.move(0);
       motor.initFOC();
       Serial.printf("bitti: offset=%.3f dir=%d\n", motor.zero_electric_angle, motor.sensor_direction);
+      focResume();
     }
   }
   else if (c=='m') {
@@ -514,17 +565,12 @@ static void handleLine(String s) {
     else if (v=="spring") mode=M_SPRING; else if (v=="endstop") mode=M_ENDSTOP;
     Serial.printf("mode=%s\n", modeName());
   }
-  else if (c=='I') {   // MT6701 I2C teshis: 0x06 cevap + ham 14-bit aci
-    Wire.beginTransmission(0x06);
-    if (Wire.endTransmission() != 0) {
-      Serial.println("I2C: 0x06 (MT6701) ACK YOK -> SDA/SCL/guc/GND kontrol et");
-    } else {
-      Wire.beginTransmission(0x06); Wire.write((uint8_t)0x03); Wire.endTransmission(false);
-      Wire.requestFrom((uint8_t)0x06, (uint8_t)2);
-      uint16_t hi = Wire.read(), lo = Wire.read();
-      uint16_t raw = (hi << 6) | (lo >> 2);
-      Serial.printf("I2C: 0x06 OK  raw=%d/16384 (%.1f deg)\n", raw, raw * 360.0f / 16384.0f);
-    }
+  else if (c=='C') { Serial.printf("CRC: toplam=%lu bozuk=%lu (%%%.2f)  kayma=%d  alan=%u\n", sensor.total, sensor.bad, sensor.total?100.0*sensor.bad/sensor.total:0.0, sensor.shift, sensor.mgStatus); sensor.total=sensor.bad=0; }
+  else if (c=='I') { sensor.update(); Serial.printf("SENSOR aci=%.2f rad (%.1f deg)\n", sensor.getAngle(), sensor.getAngle()*180.0f/PI); }
+  else if (c=='R') {   // FOC dongu hizi (Hz) — 500ms ornek
+    uint32_t n0 = focIters, t0 = millis();
+    delay(500);
+    Serial.printf("FOC dongu = %lu Hz\n", (unsigned long)((focIters - n0) * 1000UL / (millis() - t0)));
   }
   else if (c=='?') Serial.printf("STATUS aci=%.3f rad (%.1f deg) mode=%s vlim=%.2f detents=%d\n",
                                  motor.shaft_angle, motor.shaft_angle*180.0f/PI, modeName(), motor.voltage_limit, detents);
@@ -644,6 +690,68 @@ static void doAction(uint8_t act) {
   delay(5); Keyboard.releaseAll();
 }
 
+
+// ================= FOC GOREVI (core 0'da TEK basina) =================
+// Neden: ekran SPI'i, HID, buton okumasi ve seri yazdirma FOC'un arasina girince
+// hiz tahmini gecikiyor ve sonum titreme enjekte ediyor. FOC'u ayirinca
+// donguyu hicbir sey bolmuyor. (Orijinal SmartKnob de boyle yapiyor.)
+static TaskHandle_t   focTaskH = NULL;
+static volatile bool  focRun   = true;    // false -> gorev duraklar
+static volatile bool  focIdle  = false;   // gorev gercekten durakladi mi
+
+static void focPause() {                  // homing/kalibrasyon oncesi: motoru loop'a devret
+  if (!focTaskH) return;
+  focRun = false;
+  while (!focIdle) delay(1);
+}
+static void focResume() {
+  if (!focTaskH) return;
+  relAnchor = motor.shaft_angle;          // bayat referansla jerk olmasin
+  focRun = true;
+}
+
+static void focTask(void *pv) {
+  for (;;) {
+    if (!focRun) { focIdle = true; vTaskDelay(1); continue; }
+    focIdle = false;
+    focIters++;
+    motor.loopFOC();
+  // --- tork: normal haptik VEYA Mac senkronu (zorla-git) ---
+    // Yaklasim: SmartKnob mantigi — KRITIK SONUMLU 2. derece setpoint (S-egrisi, jerk yok) +
+    //           motorun setpoint'i takibi + DEAD ZONE (settle buzz'i yok) + VELOCITY CUTOFF (runaway yok).
+    float t;
+    // Deploy'dan (herhangi yoldan) cikinca goreli grid'i TAZELE -> bayat referansla jerk/titreme olmasin
+    static DeployState prevDep = DEP_OFF;
+    if (prevDep != DEP_OFF && depState == DEP_OFF) { relAnchor = motor.shaft_angle; centering = false; }
+    prevDep = depState;
+    if (depUpdate(t)) {
+      // DEPLOY modu (kasa kilidi/kol) -> torku o uretir, normal haptik+HID atlanir
+    } else if (fabsf(motor.shaft_velocity) > 40.0f) {   // VELOCITY CUTOFF (SmartKnob): runaway yok
+      t = 0;
+    } else if (centering) {
+      // MOD GECISI ORTALAMA: sabit hedef=fiziksel orta. NAZIK yay + GUCLU SONUM (overshoot/titreme YOK).
+      float e = motor.shaft_angle - midA();
+      t = -Kcenter * e;
+      t -= 0.35f * motor.shaft_velocity;   // DUSUK sonum: gurultu buyutup titretmez (yuksek sonum titreme enjekte eder)
+      bool reached     = fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f;   // ortaya oturdu
+      bool pushingAway = (e * motor.shaft_velocity) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
+      if (reached || pushingAway || millis() - centerStart > 700) {
+        centering = false;
+        relAnchor = motor.shaft_angle;   // goreli grid'i knob'un su anki yerinden baslat
+        Serial.printf("ORTALAMA bitti (%s) aci=%.1f\n",
+          reached ? "oturdu" : pushingAway ? "kullanici-dokundu" : "timeout", motor.shaft_angle*180.0f/PI);
+      }
+    } else {
+      // TEK yol: yerel deterministik haptik. Sync ARTIK motoru surmez -> titreme/atlama yok.
+      t = hapticTorque(motor.shaft_angle);
+      t -= damping * motor.shaft_velocity;
+    }
+    float vmax = centering ? 2.5f : motor.voltage_limit;   // ortalama NAZIK (dusuk V, savasamaz)
+    lastT = _constrain(t, -vmax, vmax);
+    motor.move(lastT);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(800);
@@ -656,19 +764,11 @@ void setup() {
   Serial.println();
   Serial.println("SmartKnob — CLOSED-LOOP FOC + haptik");
 
-  // AS5600 I2C pin sirasini OTOMATIK algila (kablo capraz olsa da calissin — SDA/SCL karisinca dert cikmasin)
-  auto probe = [](int sda, int scl) -> bool {
-    Wire.end(); Wire.begin(sda, scl, 100000); delay(20);   // 100kHz: I2C glitch/bozulma azalir (uzun tel/gurultu)
-    Wire.beginTransmission(0x06); return Wire.endTransmission() == 0;
-  };
-  if (probe(PIN_I2C_SDA, PIN_I2C_SCL)) {
-    Serial.println("MT6701: (SDA=5,SCL=6) normal baglanti.");
-  } else if (probe(PIN_I2C_SCL, PIN_I2C_SDA)) {
-    Serial.println("MT6701: TERS baglanti algilandi (SDA=6,SCL=5) — ters sirada devam.");
-  } else {
-    Serial.println("HATA: MT6701 0x06 bulunamadi! (guc/tel) — homing calismaz.");
-  }
-  sensor.init(&Wire);
+  // Sensor: SSI (CLK=GPIO6, DO=GPIO5, CSN=GPIO7). MOSI kullanilmiyor (-1).
+  sensorSPI.begin(PIN_I2C_SCL, PIN_I2C_SDA, -1, PIN_MT_CSN);
+  sensor.init(&sensorSPI);
+  Serial.printf("MT6701 SSI: CLK=%d DO=%d CSN=%d\n", PIN_I2C_SCL, PIN_I2C_SDA, PIN_MT_CSN);
+
   motor.linkSensor(&sensor);
 
   driver.voltage_power_supply = MOTOR_SUPPLY_V;   // 12V
@@ -678,8 +778,8 @@ void setup() {
   motor.linkDriver(&driver);
 
   motor.controller    = MotionControlType::torque;   // tork = voltaj (akim sensoru yok)
-  motor.voltage_limit = 5.0f;                         // haptik tork tavani (L298N dususu icin biraz yuksek)
-  motor.voltage_sensor_align = 7.0f;                  // KALIBRASYON voltaji yuksek: rotor elektriksel sifira SAGLAM otursun (tutarli offset)
+  motor.voltage_limit = 4.5f;                         // haptik tork tavani (L6234 ~1.8V dususu hesaba katilmis)
+  motor.voltage_sensor_align = 5.0f;                  // KALIBRASYON voltaji yuksek: rotor elektriksel sifira SAGLAM otursun (tutarli offset)
   motor.velocity_limit = 100;
   motor.LPF_velocity.Tf = 0.03f;                      // hiz LPF: damping'i temizler (titreme->salinim yerine duz)
   motor.useMonitoring(Serial);                        // initFOC ayrintilarini goster
@@ -687,7 +787,12 @@ void setup() {
 
   // KALIBRASYON OTOMATIK: initFOC her acilista offset+yonu kendi bulur (rewiring'e dayanikli).
   // (Motor kisaca oynar ~1s. Faz sirasi/kablo degisirse dogru degerler otomatik cikar.)
-  Serial.println("initFOC (OTOMATIK kalibrasyon — motor kisaca oynayacak)...");
+  // SABIT KALIBRASYON: otomatik hizalama guvenilmezdi (bazen PP check fail -> FOC olu, centik yok).
+  // Iki temiz olcumun degeri: offset 0.214 ve 0.240, yon CCW -> ortalama 0.227.
+  // Boylece acilista motor OYNAMAZ ve her acilis AYNI his. ('P 7' ile otomatige donulebilir.)
+  motor.zero_electric_angle = 0.227f;
+  motor.sensor_direction    = Direction::CCW;
+  Serial.println("initFOC (SABIT kalibrasyon: offset=0.227 dir=CCW)...");
   motor.initFOC();
   Serial.printf("initFOC bitti. zero_offset=%.3f dir=%d  (sabit kod icin not al)\n",
                 motor.zero_electric_angle, motor.sensor_direction);
@@ -698,6 +803,7 @@ void setup() {
   Wire1.begin(PIN_I2C1_SDA, PIN_I2C1_SCL, 100000);
   Wire1.beginTransmission(0x20);
   bool pcf = (Wire1.endTransmission() == 0);
+  pcfPresent = pcf;
   if (pcf) { Wire1.beginTransmission(0x20); Wire1.write(0xFF); Wire1.endTransmission(); }  // hepsi giris
   Serial.printf("PCF8574 (0x20): %s\n", pcf ? "VAR — herhangi butona bas = mod degistir" : "yok");
 
@@ -713,13 +819,16 @@ void setup() {
   tftSPI.begin(PIN_TFT_SCK, -1, PIN_TFT_MOSI, PIN_TFT_CS);
   tft.init(240, 320); tft.setRotation(3);   // YATAY (landscape, 180 donuk) -> 320x240
   drawScreen();
-  xTaskCreatePinnedToCore(displayTask, "disp", 4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(displayTask, "disp", 4096, NULL, 1, NULL, 1);   // ekran: core 1 (loop ile birlikte)
+
+  // FOC: core 0'da tek basina, yuksek oncelik. Tight loop oldugu icin core 0 WDT kapali.
+  disableCore0WDT();
+  xTaskCreatePinnedToCore(focTask, "foc", 4096, NULL, 5, &focTaskH, 0);
 
   Serial.println("HAZIR. Komut: v m d k b f H S VOL<n> ?  | HID+LED+Mac senkron");
 }
 
 void loop() {
-  motor.loopFOC();
 
   // Aciliste bir kez: HS'e "volume modu" bildir (F16) -> HS guncel Mac sesini yollar (boot sync)
   static bool bootSynced = false;
@@ -728,39 +837,6 @@ void loop() {
     Keyboard.press(KEY_F16); delay(5); Keyboard.releaseAll();
   }
 
-  // --- tork: normal haptik VEYA Mac senkronu (zorla-git) ---
-  // Yaklasim: SmartKnob mantigi — KRITIK SONUMLU 2. derece setpoint (S-egrisi, jerk yok) +
-  //           motorun setpoint'i takibi + DEAD ZONE (settle buzz'i yok) + VELOCITY CUTOFF (runaway yok).
-  float t;
-  // Deploy'dan (herhangi yoldan) cikinca goreli grid'i TAZELE -> bayat referansla jerk/titreme olmasin
-  static DeployState prevDep = DEP_OFF;
-  if (prevDep != DEP_OFF && depState == DEP_OFF) { relAnchor = motor.shaft_angle; centering = false; }
-  prevDep = depState;
-  if (depUpdate(t)) {
-    // DEPLOY modu (kasa kilidi/kol) -> torku o uretir, normal haptik+HID atlanir
-  } else if (fabsf(motor.shaft_velocity) > 40.0f) {   // VELOCITY CUTOFF (SmartKnob): runaway yok
-    t = 0;
-  } else if (centering) {
-    // MOD GECISI ORTALAMA: sabit hedef=fiziksel orta. NAZIK yay + GUCLU SONUM (overshoot/titreme YOK).
-    float e = motor.shaft_angle - midA();
-    t = -Kcenter * e;
-    t -= 0.35f * motor.shaft_velocity;   // DUSUK sonum: gurultu buyutup titretmez (yuksek sonum titreme enjekte eder)
-    bool reached     = fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f;   // ortaya oturdu
-    bool pushingAway = (e * motor.shaft_velocity) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
-    if (reached || pushingAway || millis() - centerStart > 700) {
-      centering = false;
-      relAnchor = motor.shaft_angle;   // goreli grid'i knob'un su anki yerinden baslat
-      Serial.printf("ORTALAMA bitti (%s) aci=%.1f\n",
-        reached ? "oturdu" : pushingAway ? "kullanici-dokundu" : "timeout", motor.shaft_angle*180.0f/PI);
-    }
-  } else {
-    // TEK yol: yerel deterministik haptik. Sync ARTIK motoru surmez -> titreme/atlama yok.
-    t = hapticTorque(motor.shaft_angle);
-    t -= damping * motor.shaft_velocity;
-  }
-  float vmax = centering ? 2.5f : motor.voltage_limit;   // ortalama NAZIK (dusuk V, savasamaz)
-  lastT = _constrain(t, -vmax, vmax);
-  motor.move(lastT);
 
   if (hidReleaseAt && millis() >= hidReleaseAt) { Consumer.release(); Keyboard.releaseAll(); hidReleaseAt = 0; }
 
@@ -795,7 +871,7 @@ void loop() {
   // --- PCF8574 buton (I2C1): herhangi butona basinca mod degistir (ses <-> masaustu) ---
   static uint32_t lastBtnPoll = 0;
   static uint8_t  lastBtn = 0xFF;
-  if (millis() - lastBtnPoll > 40) {   // 40ms poll = debounce + FOC'a dokunmaz
+  if (pcfPresent && millis() - lastBtnPoll > 40) {   // 40ms poll = debounce + FOC'a dokunmaz
     lastBtnPoll = millis();
     if (Wire1.requestFrom((uint8_t)0x20, (uint8_t)1) && Wire1.available()) {
       uint8_t b = Wire1.read();

@@ -25,6 +25,7 @@
 #ifndef PIN_I2C_SCL
 #define PIN_I2C_SCL   6    // GPIO6  -> AS5600 SCL + PCF8574 SCL
 #endif
+#define PIN_MT_CSN    7    // GPIO7 -> MT6701 Z pini = SSI CSN
 // AS5600 adres 0x36 | PCF8574 buton 0x20..0x27
 // !!! AS5600 3V3'ten beslensin (ust SOL 3V3 pini) — 5V YAKAR !!!
 

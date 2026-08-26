@@ -30,10 +30,16 @@ static void printStatus() {
 }
 
 static String rx;
+// GUVENLIK: komut gelmezse motoru kes (donmeyen motor akim cekip ISINIR — motor yakmayalim)
+static uint32_t lastCmdMs = 0;
+static const uint32_t AUTO_STOP_MS = 4000;   // 4sn komut yoksa dur
+static bool autoStopped = false;
+
 static void handleLine(String s) {
   s.trim();
   if (s.length() == 0) return;
-  if (s == "s") { target = 0; Serial.println("STOP"); printStatus(); return; }
+  if (s == "s") { target = 0; motor.disable(); autoStopped = true;   // STOP: surucuyu GERCEKTEN kes (acik dongude tutma akimi ISITIR)
+                 Serial.println("STOP (surucu kapatildi)"); printStatus(); return; }
   if (s == "?") { printStatus(); return; }
   if (s.startsWith("t")) {
     target = s.substring(1).toFloat();
@@ -60,8 +66,9 @@ void setup() {
   // Surucu
   driver.voltage_power_supply = MOTOR_SUPPLY_V;  // 12V gercek besleme
   driver.voltage_limit        = 6.0f;            // surucu capi (guvenli tavan)
+  SimpleFOCDebug::enable(&Serial);   // MCPWM/driver ic detaylarini yazdir (teshis)
   if (!driver.init()) {
-    Serial.println("HATA: driver.init() basarisiz — pin/baglanti kontrol");
+    Serial.println("!!! SURUCU BASLATILAMADI (driver.init FALSE) !!!");
     return;
   }
   motor.linkDriver(&driver);
@@ -78,11 +85,6 @@ void setup() {
   Serial.println("Ilk deneme: 't 5' gonder. Kipirdamiyorsa 'v 3', sonra 'v 4' (isiyi izle).");
   printStatus();
 }
-
-// GUVENLIK: komut gelmezse motoru kes (donmeyen motor akim cekip ISINIR — motor yakmayalim)
-static uint32_t lastCmdMs = 0;
-static const uint32_t AUTO_STOP_MS = 4000;   // 4sn komut yoksa dur
-static bool autoStopped = false;
 
 void loop() {
   // GUVENLIK: son komuttan 4sn sonra otomatik dur (motor isinmasin)
