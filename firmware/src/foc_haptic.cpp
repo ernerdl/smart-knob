@@ -803,6 +803,16 @@ static void focTask(void *pv) {
 }
 
 void setup() {
+  // EN ILK IS: motor PWM hatlarini LOW'a cek.
+  // EN pini 3V3'e sabit oldugu icin L6234 reset boyunca AKTIF; IN hatlari bosta kalinca
+  // cikislar tanimsiz olup motora DC basiyor (guc kaynagi CC'ye giriyor, ~1-2sn).
+  // Uc IN de LOW = uc alt DMOS acik = motor uclari GND'ye kisa = akim YOK, guvenli fren.
+  // KALICI COZUM DONANIMDA: IN1/IN2/IN3'e 10k pull-down (GND'ye). Bu satirlar sadece
+  // firmware baslayana kadarki pencereyi kisaltir; ROM boot suresini kapatamaz.
+  pinMode(PIN_MOTOR_A, OUTPUT); digitalWrite(PIN_MOTOR_A, LOW);
+  pinMode(PIN_MOTOR_B, OUTPUT); digitalWrite(PIN_MOTOR_B, LOW);
+  pinMode(PIN_MOTOR_C, OUTPUT); digitalWrite(PIN_MOTOR_C, LOW);
+
   Serial.begin(115200);
   delay(800);
 
@@ -829,7 +839,9 @@ void setup() {
 
   motor.controller    = MotionControlType::torque;   // tork = voltaj (akim sensoru yok)
   motor.voltage_limit = 4.5f;                         // haptik tork tavani (L6234 ~1.8V dususu hesaba katilmis)
-  motor.voltage_sensor_align = 5.0f;                  // KALIBRASYON voltaji yuksek: rotor elektriksel sifira SAGLAM otursun (tutarli offset)
+  // Kalibrasyon SABIT kodlu (offset+yon asagida) -> hizalamaya yuksek voltaj GEREKMIYOR.
+  // 5V idi: bootta 1-2sn boyunca motora DC basip guc kaynagini CC'ye sokuyordu.
+  motor.voltage_sensor_align = 1.0f;
   motor.velocity_limit = 100;
   motor.LPF_velocity.Tf = 0.03f;                      // hiz LPF: damping'i temizler (titreme->salinim yerine duz)
   motor.useMonitoring(Serial);                        // initFOC ayrintilarini goster
