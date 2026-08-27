@@ -62,6 +62,7 @@ static bool forcing = false;      // ARTIK KULLANILMIYOR (sync motoru surmez) �
 // HERSEY GORELI: motor mutlak konuma zorlanmaz, hareket delta'sindan adim uretir.
 static float relAnchor = 0;       // son islenmis centik merkezi (goreli grid referansi)
 static int   dispIdx = 0;         // LED'de gosterilen aktif index (HS'ten SP/TAB ile gelir; KOZMETIK)
+uint8_t tftRot = 1;      // ekran yonu (0-3). 3 idi; kasaya ters vidalanmis, 180 cevrildi.
 float volSpacing = 0.220f; // 12.6 deg — 25 centik. ARALIK = GUC (tepe kuvvet Kdet*sp/2 = 2.4V).
                            // CENTIGIN GUCUNU ARALIK VERIR: tepe kuvvet = Kdet*sp/2 (testere).
                            // 0.15'te 1.65V idi, 0.327'de 3.6V. Sertligi artirmak guc VERMEZ,
@@ -675,6 +676,22 @@ static void handleLine(String s) {
   char c = s[0];
   String v = s.substring(1); v.trim();
   if (c=='v') { motor.voltage_limit = v.toFloat(); Serial.printf("voltage_limit=%.2f\n", motor.voltage_limit); }
+  else if (c=='u') { tftRot = (uint8_t)(v.toInt() & 3); tft.setRotation(tftRot); tft.fillScreen(ST77XX_BLACK); Serial.printf("ekran yonu=%d (ekran bir sonraki degisimde cizilir)\n", tftRot); }
+  else if (c=='n') {   // EKRAN TESTI: kablolamayi/rotasyonu dogrula
+    Serial.println("Ekran testi: renk barlari + metin");
+    tft.fillScreen(ST77XX_BLACK);
+    const uint16_t cols[6] = { ST77XX_RED, ST77XX_GREEN, ST77XX_BLUE,
+                               ST77XX_YELLOW, ST77XX_CYAN, ST77XX_MAGENTA };
+    for (int i = 0; i < 6; i++) tft.fillRect(i*53, 0, 53, 90, cols[i]);
+    tft.drawRect(0, 0, 320, 240, ST77XX_WHITE);           // cerceve: tam sigmali
+    tft.setTextColor(ST77XX_WHITE); tft.setTextSize(3);
+    tft.setCursor(10, 110); tft.print("SMARTKNOB");
+    tft.setTextSize(2);
+    tft.setCursor(10, 150); tft.print("sol ust = KIRMIZI");
+    tft.setCursor(10, 175); tft.print("cerceve tam gorunmeli");
+    tft.setCursor(10, 205); tft.print("320x240 yatay");
+    Serial.println("Beklenen: 6 renk bari, beyaz cerceve kenarlara tam otursun.");
+  }
   else if (c=='s') { volSpacing = v.toFloat(); Serial.printf("volSpacing=%.3f rad (%.1f deg) -> sinus tepe kuvvet %.2f V\n", volSpacing, volSpacing*57.3f, Kdet*volSpacing/6.283f); }
   else if (c=='d') { detents = max(1, (int)v.toInt()); Serial.printf("detents=%d\n", detents); }
   else if (c=='k') { Kdet = v.toFloat(); Serial.printf("Kdet=%.2f\n", Kdet); }
@@ -1062,7 +1079,7 @@ void setup() {
 
   // Ekran: ayri core'da (core 0) render — FOC loop core 1'de pürüzsüz kalir
   tftSPI.begin(PIN_TFT_SCK, -1, PIN_TFT_MOSI, PIN_TFT_CS);
-  tft.init(240, 320); tft.setRotation(3);   // YATAY (landscape, 180 donuk) -> 320x240
+  tft.init(240, 320); tft.setRotation(tftRot);   // YATAY 320x240 ('u <0-3>' ile cevrilir)
   drawScreen();
   xTaskCreatePinnedToCore(displayTask, "disp", 4096, NULL, 1, NULL, FOC_SEPARATE_CORE ? 1 : 0);
 
