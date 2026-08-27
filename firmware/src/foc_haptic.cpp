@@ -173,6 +173,22 @@ bool  homed = false;           // homing yapildi mi? Bootta YAPILMIYOR: duvara d
                                // scroll) goreli grid kullandigi icin duvarlari BILMEK ZORUNDA DEGIL.
                                // Sadece deploy modu duvarlara ihtiyac duyar -> ilk girişte yapilir.
 float homingV = 4.5f;    // homing itme voltaji (nazik — duvara sert vurmasin)
+// --- BURST KAYIT: tam dongu hizinda RAM'e yaz, sonra dok. Seri telemetri 167 Hz'di,
+// yani 83 Hz uzeri her seyi TAKMA FREKANS olarak yanlis gosteriyordu. Salinim 50-500 Hz
+// bandinda oldugu icin o olcumler gecersizdi. Bu, gercek dongu hizinda kayit alir.
+#define BURST_N 2500
+static int16_t  bAng[BURST_N];   // aci, 0.01 deg birim
+static int16_t  bVel[BURST_N];   // hiz, 0.01 rad/s birim
+static int16_t  bTrq[BURST_N];   // tork, 0.001 V birim
+static volatile int bIdx = -1;   // -1 = kapali, -2 = TETIK BEKLIYOR
+static float bTrigV = 8.0f;      // tetik hizi (rad/s)
+static uint32_t bT0 = 0, bT1 = 0;   // bT1 = SON ornegin zamani (dolum bitisi)
+float centerHyst  = 0.0f;    // haptik merkez histerezisi (x centik araligi).
+                             // DENENDI ve KAPATILDI (27.08): olcum lehineydi (sinir gecisi/derece
+                             // 0.53 -> 0.13, baskin frekans 47 -> 26 Hz) ama HIS daha kotuydu.
+                             // Kod duruyor, 'X <k>' ile acilabilir. Karar hisle verildi.
+static float hapCenter = 0;  // mevcut centik merkezi — artik DURUM, anlik hesaplanmiyor
+float revThrK = 0.6f;    // yon degistirme esigi (x centik araligi). 0.6=eski simetrik, 1.0=yeni
 float vHalf   = 1.2f;    // sonum devreye girme hizi (rad/s). |v|<<vHalf -> sonum ~0 (durakta vizilti yok)
                          // |v|>>vHalf -> tam sonum (cevirip birakinca cinlamayi yutar)
 float deadZone = 0.012f; // ~0.7 deg olu bolge — L6234'un kaba minimum torku burada devreye girmesin
@@ -395,8 +411,20 @@ static float hapticTorque(float a) {
   // Konum mutlak degil (relAnchor'a gore) -> mod gecisinde "konum=deger" cakismasi yok.
   if (mode == M_DETENT) {
     float sp = detentSpacing();
-    float c  = relAnchor + roundf((a - relAnchor) / sp) * sp;
-    float e  = a - c;
+    // MERKEZ SECIMINDE HISTEREZIS (27.08 olcumu).
+    // Eskiden: c = relAnchor + roundf((a-relAnchor)/sp)*sp -> merkez tam ortada ANINDA
+    // fliplenirdi. Knob sinira yakinken en ufak titresim hedefi BIR TAM CENTIK ileri-geri
+    // ziplatiyor; her flipte Kdet*sp buyuklugunde tork basamagi = ENERJI ENJEKSIYONU.
+    // Olculdu: sonum 0.35'te 474ms icinde 91 sinir gecisi, salinim 47 Hz'e kilitlenip
+    // tork tavanina dayaniyordu. Sonum ARTIRMAK kotulestiriyor cunku knob'u sinir
+    // civarinda daha uzun tutuyor. Artik merkez bir DURUM; degismesi icin
+    // (0.5+centerHyst)*sp gerekiyor. centerHyst=0 -> eski davranis.
+    if (fabsf(a - hapCenter) > 3.0f * sp)                  // grid kaydiysa (mod gecisi) hizala
+      hapCenter = relAnchor + roundf((a - relAnchor) / sp) * sp;
+    float thr = sp * (0.5f + centerHyst);
+    float e = a - hapCenter;
+    while (e >  thr) { hapCenter += sp; e -= sp; }
+    while (e < -thr) { hapCenter -= sp; e += sp; }
     // OLU BOLGE: centik merkezine cok yakinken tork UYGULAMA. Merkez etrafindaki
     // mikro-salinimi (parmakla supururken sekme) kokten keser. 'z' ile ayarlanir.
     if (fabsf(e) < deadZone) return 0;
@@ -592,6 +620,21 @@ static void handleLine(String s) {
   else if (c=='C') { Serial.printf("CRC: toplam=%lu bozuk=%lu (%%%.2f)  kayma=%d  alan=%u\n", sensor.total, sensor.bad, sensor.total?100.0*sensor.bad/sensor.total:0.0, sensor.shift, sensor.mgStatus); sensor.total=sensor.bad=0; }
   else if (c=='I') { sensor.update(); Serial.printf("SENSOR aci=%.2f rad (%.1f deg)\n", sensor.getAngle(), sensor.getAngle()*180.0f/PI); }
   else if (c=='T') { focPeriodUs = v.toInt(); Serial.printf("focPeriod=%lu us (%s)\n", (unsigned long)focPeriodUs, focPeriodUs ? String(1000000.0f/focPeriodUs,0).c_str() : "max"); }
+  else if (c=='B') {   // burst kayit baslat
+    if (v.length()) bTrigV = v.toFloat();
+    bIdx = -2;
+    Serial.printf("BURST silahli — tetik hizi %.1f rad/s. SAVUR.\n", bTrigV);
+  }
+  else if (c=='G') {   // burst dok
+    uint32_t dur = bT1 - bT0;   // dolum suresi (bekleme haric)
+    int n = bIdx < 0 ? 0 : bIdx;
+    Serial.printf("BURST n=%d sure_us=%lu hz=%.0f\n", n, (unsigned long)dur, n ? n*1e6f/dur : 0);
+    for (int i = 0; i < n; i++) Serial.printf("%d %d %d\n", bAng[i], bVel[i], bTrq[i]);
+    Serial.println("BURST son");
+    bIdx = -1;
+  }
+  else if (c=='X') { centerHyst = v.toFloat(); Serial.printf("centerHyst=%.2f (merkez %.2f x centik gecince degisir)\n", centerHyst, 0.5f+centerHyst); }
+  else if (c=='Y') { revThrK = v.toFloat(); Serial.printf("revThrK=%.2f (yon degistirme esigi = %.2f x centik)\n", revThrK, revThrK); }
   else if (c=='V') { vHalf = v.toFloat(); Serial.printf("vHalf=%.2f rad/s\n", vHalf); }
   else if (c=='K') {   // TEKME testi: duvardan uzaga sabit darbe, sonra serbest birak
     relAnchor = motor.shaft_angle;
@@ -792,6 +835,14 @@ static void focStep() {
     float vmax = centering ? 2.5f : motor.voltage_limit;   // ortalama NAZIK (dusuk V, savasamaz)
     lastT = _constrain(t, -vmax, vmax);
     motor.move(lastT);
+    if (bIdx == -2 && fabsf(motor.shaft_velocity) > bTrigV) { bIdx = 0; bT0 = micros(); }   // tetik
+    if (bIdx >= 0 && bIdx < BURST_N) {   // kayit (tam dongu hizinda)
+      int i = bIdx;
+      bAng[i] = (int16_t)_constrain(motor.shaft_angle*18000.0f/PI, -32000, 32000);
+      bVel[i] = (int16_t)_constrain(motor.shaft_velocity*100.0f,   -32000, 32000);
+      bTrq[i] = (int16_t)_constrain(lastT*1000.0f,                 -32000, 32000);
+      bIdx = i + 1; bT1 = micros();
+    }
 }
 
 static void focTask(void *pv) {
@@ -939,9 +990,10 @@ void loop() {
     // SAHTE bir ters adim uretiyordu. Supurmeyi bitirirken elin dogal geri gelisi
     // her seferinde bunu tetikliyordu -> "sesi 5 artir 1 azalt" + hissedilen atlama.
     // Cozum: ayni yonde devam UCUZ, yon degistirmek PAHALI.
+    // 'Y' komutu ile ESKI simetrik davranisa donulebilir (A/B karsilastirma icin).
     static int lastStepDir = 0;
-    float thrFwd = sp * 0.6f;   // ayni yonde devam
-    float thrRev = sp * 1.0f;   // yon degistir: TAM bir centik geri gerek
+    float thrFwd = sp * 0.6f;                        // ayni yonde devam
+    float thrRev = sp * revThrK;                     // yon degistir ('Y <k>' ile ayarlanir; 0.6=eski simetrik)
     float thrP = (lastStepDir >= 0) ? thrFwd : thrRev;   // ileri icin esik
     float thrN = (lastStepDir <= 0) ? thrFwd : thrRev;   // geri icin esik
     if (d >  thrP) step = +1;
