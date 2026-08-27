@@ -30,7 +30,8 @@
 // !!! AS5600 3V3'ten beslensin (ust SOL 3V3 pini) — 5V YAKAR !!!
 
 // --- RGB (NeoPixel ring) ---
-#define PIN_RGB       4    // GPIO14 -> WS2812 DIN (standalone testte calismisti)
+#define PIN_RGB       4    // WS2812 DIN — DOGRU PIN 4. (Eski yorum "GPIO14", v1 dokumani "7"
+                           //  diyordu; ikisi de BAYAT. Firmware bu pini suruyor.)
 // DevKitC-1 onboard WS2812 = GPIO48 (sag, hizli test icin)
 
 // --- I2C1 (Wire1): PCF8574 buton genisletici — AYRI bus (AS5600 hattini yavaslatmaz) ---

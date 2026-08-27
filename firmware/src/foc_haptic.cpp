@@ -702,6 +702,15 @@ static void handleLine(String s) {
   else if (c=='S') { stream = !stream; Serial.printf("stream=%d\n", stream); }
   else if (c=='D') { dbgStep = !dbgStep; Serial.printf("dbgStep=%d\n", dbgStep); }
   else if (c=='H') { focPause(); home(); focResume(); }
+  else if (c=='Z') {   // GPIO4 KARE DALGA: multimetreyle pin+kablo testi (1 Hz, 10 sn)
+    Serial.println("GPIO4 yavas yanip sonuyor (10 sn). DIN ucunda DC volt olc:");
+    Serial.println("  0V <-> 3.3V arasi gidip geliyorsa PIN ve KABLO SAGLAM.");
+    Serial.println("  sabit 0V ise kablo kopuk/yanlis pin. sabit 3.3V ise kisa devre.");
+    pinMode(PIN_RGB, OUTPUT);
+    for (int i = 0; i < 20; i++) { digitalWrite(PIN_RGB, i & 1); delay(500); }
+    digitalWrite(PIN_RGB, LOW);
+    Serial.println("bitti — LED'leri tekrar surmek icin karti RESETLE");
+  }
   else if (c=='L') { fill_solid(leds, NLED, CRGB(120,120,120)); FastLED.show(); Serial.println("LED test: hepsi beyaz"); }
   else if (c=='w') { wallMargin = v.toFloat() * PI / 180.0f; Serial.printf("wallMargin=%.1f deg\n", wallMargin*180.0f/PI); }
   else if (c=='W') { Kwall = v.toFloat(); Serial.printf("Kwall=%.1f\n", Kwall); }
