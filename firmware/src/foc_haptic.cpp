@@ -62,7 +62,7 @@ static bool forcing = false;      // ARTIK KULLANILMIYOR (sync motoru surmez) �
 // HERSEY GORELI: motor mutlak konuma zorlanmaz, hareket delta'sindan adim uretir.
 static float relAnchor = 0;       // son islenmis centik merkezi (goreli grid referansi)
 static int   dispIdx = 0;         // LED'de gosterilen aktif index (HS'ten SP/TAB ile gelir; KOZMETIK)
-float volSpacing = 0.327f; // 18.7 deg — 17 centik fiziksel aralia (~300 deg) yayilir.
+float volSpacing = 0.220f; // 12.6 deg — 25 centik. ARALIK = GUC (tepe kuvvet Kdet*sp/2 = 2.4V).
                            // CENTIGIN GUCUNU ARALIK VERIR: tepe kuvvet = Kdet*sp/2 (testere).
                            // 0.15'te 1.65V idi, 0.327'de 3.6V. Sertligi artirmak guc VERMEZ,
                            // sadece sinir egimini dikleştirip kararsizlik yaratir.  // VOLUME goreli centik araligi (~8.6°; 16 adim ~137° < 300° -> fiziksel araliga sigar)
@@ -168,7 +168,10 @@ int   detents = 17;      // 17 pozisyon = 0..16 ses seviyesi (16 kademe gecisi =
 float Kdet    = 22.0f;   // centik SERTLIGI = sinir egimi. Kararsizligi BU belirler, gucu degil.
 float Kspring = 8.0f;    // yay
 float Kwall   = 40.0f;   // duvar (sert)
-float damping = 0.0f;    // SIFIR. Bu sistemde sonum kararliligi BOZUYOR (27.08, alti olcum:
+float damping = 0.05f;   // COK KUCUK. Eski degerlerin (0.15-0.30) ucte biri.
+                         // Isi: savurma sonrasi cinlamayi sondurmek DEGIL — knob'un iki centik
+                         // ARASINDA gelgit yapip takilmasini engellemek. O is icin bu kadari yeter.
+                         // Buyutme durtusune diren (27.08, alti olcum:
                          // 0.15->2, 0.35->14, 0.55->47 cirpinti; est modda da ayni).
                          // SimpleFOC'un resmi haptik ornegi de D=0 kullaniyor.
                          // ESKI DEGER 0.15/0.30 idi; sonum ekleme durtusune direnelim.   // hiz sonumleme — DUSUK TUT. Olculdu: 0.15->2 cirpinti, 0.35->14, 0.55->47.
