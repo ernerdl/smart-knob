@@ -62,7 +62,10 @@ static bool forcing = false;      // ARTIK KULLANILMIYOR (sync motoru surmez) �
 // HERSEY GORELI: motor mutlak konuma zorlanmaz, hareket delta'sindan adim uretir.
 static float relAnchor = 0;       // son islenmis centik merkezi (goreli grid referansi)
 static int   dispIdx = 0;         // LED'de gosterilen aktif index (HS'ten SP/TAB ile gelir; KOZMETIK)
-static float volSpacing = 0.15f;  // VOLUME goreli centik araligi (~8.6°; 16 adim ~137° < 300° -> fiziksel araliga sigar)
+float volSpacing = 0.327f; // 18.7 deg — 17 centik fiziksel aralia (~300 deg) yayilir.
+                           // CENTIGIN GUCUNU ARALIK VERIR: tepe kuvvet = Kdet*sp/2 (testere).
+                           // 0.15'te 1.65V idi, 0.327'de 3.6V. Sertligi artirmak guc VERMEZ,
+                           // sadece sinir egimini dikleştirip kararsizlik yaratir.  // VOLUME goreli centik araligi (~8.6°; 16 adim ~137° < 300° -> fiziksel araliga sigar)
 // MOD GECISI ORTALAMA: mod degisince motor bir kerelik fiziksel ORTAYA doner -> iki yone de yer acilir.
 // SABIT hedefe (orta) gider, DEGERE degil -> kovalanan hareketli hedef yok, forcing gibi savasamaz.
 static bool     centering = false;
@@ -162,10 +165,13 @@ BLDCDriver3PWM    driver = BLDCDriver3PWM(PIN_MOTOR_A, PIN_MOTOR_B, PIN_MOTOR_C)
 enum Mode { M_FREE, M_DETENT, M_SPRING, M_ENDSTOP };
 Mode  mode    = M_DETENT;   // acilista centik (sabit kalibrasyon guvenilir) — 'm detent' ile centikleri ac (titreme USB'yi dusurmesin)
 int   detents = 17;      // 17 pozisyon = 0..16 ses seviyesi (16 kademe gecisi = macOS)
-float Kdet    = 22.0f;   // centik sertligi (26.08 olcumlu ayar)
+float Kdet    = 22.0f;   // centik SERTLIGI = sinir egimi. Kararsizligi BU belirler, gucu degil.
 float Kspring = 8.0f;    // yay
 float Kwall   = 40.0f;   // duvar (sert)
-float damping = 0.15f;   // hiz sonumleme — DUSUK TUT. Olculdu: 0.15->2 cirpinti, 0.35->14, 0.55->47.
+float damping = 0.0f;    // SIFIR. Bu sistemde sonum kararliligi BOZUYOR (27.08, alti olcum:
+                         // 0.15->2, 0.35->14, 0.55->47 cirpinti; est modda da ayni).
+                         // SimpleFOC'un resmi haptik ornegi de D=0 kullaniyor.
+                         // ESKI DEGER 0.15/0.30 idi; sonum ekleme durtusune direnelim.   // hiz sonumleme — DUSUK TUT. Olculdu: 0.15->2 cirpinti, 0.35->14, 0.55->47.
                          // Hiz tahmini gecikmeli oldugu icin yuksek sonum titremeyi SONDURMEZ, BESLER.
 float minA = 0, maxA = 1.0f;   // FIZIKSEL duvar acilari (homing ile bulunur)
 bool  homed = false;           // homing yapildi mi? Bootta YAPILMIYOR: duvara dayanmak stall = guc
@@ -198,16 +204,18 @@ static float hapCenter = 0;  // mevcut centik merkezi — artik DURUM, anlik hes
 // Sonum artik SERTLIGE BAGLI olabilir: B = dampRatio * sqrt(Kdet).
 // Gerekce: kritik sonum B_krit = 2*zeta*sqrt(K*J) -> sertligin KAREKOKUYLE olcekler.
 // dampRatio = 0 -> sabit 'damping' kullanilir (eski davranis).
+float relW = 0.10f;      // profil 2: sinir yumusatma penceresi (x centik araligi)
+int   detProfile = 0;    // 0 = testere. Sinus (1) denendi: kararli ama tepe kuvvet 1/3.    // 0 = testere (mevcut), 1 = sinus (surekli). 'p <0|1>'
 float dampRatio = 0.0f;
 float phaseR  = 2.75f;    // OLCULDU: faz-faz 5.51 ohm (uc kombinasyon da ayni) -> yildiz sarim, /2
 float motorKV = 140.0f;   // Motor etiketi: 2805, 140KV -> Ke = 1/(KV*sqrt3*RPM_TO_RADS) = 0.0394 V.s/rad
-bool  estMode = true;     // ACIK. Olculdu: 305 derece uctan uca savurma -> 238ms'de TAM durdu
+bool  estMode = false;    // KAPALI (kararli ayar bunsuz bulundu). Olculdu: 305 derece uctan uca savurma -> 238ms'de TAM durdu
                           // (son 80ms hiz std = 0.000). Est kapaliyken cok daha az enerjiyle
                           // hic durmuyordu. 'E' ile kapatilabilir.
 float revThrK = 0.6f;    // yon degistirme esigi (x centik araligi). 0.6=eski simetrik, 1.0=yeni
 float vHalf   = 1.2f;    // sonum devreye girme hizi (rad/s). |v|<<vHalf -> sonum ~0 (durakta vizilti yok)
                          // |v|>>vHalf -> tam sonum (cevirip birakinca cinlamayi yutar)
-float deadZone = 0.012f; // ~0.7 deg olu bolge — L6234'un kaba minimum torku burada devreye girmesin
+float deadZone = 0.0f;   // gerekmiyor (sonum 0 iken merkez zaten sakin) // ~0.7 deg olu bolge — L6234'un kaba minimum torku burada devreye girmesin
 float wallMargin = 0.14f;// duvar ihtiyat payi (rad ~8°): centikler bu payin ICINE yayilir
 
 // seviye <-> aci + LED yardimcilari
@@ -280,8 +288,8 @@ static void sendStep(int dir) {
 // Mod uygula (MODE komutu VE PCF butonu ayni yoldan kullanir)
 static void applyMode(AppMode m) {
   appMode = m;
-  if (m == APP_SPACES)     { detents = 3;  Kdet = 30.0f; }   // HS 'SP n idx' ile gunceller
-  else if (m == APP_TABS)  { detents = 8;  Kdet = 30.0f; }   // HS 'TAB n idx' ile gunceller
+  if (m == APP_SPACES)     { detents = 3;  Kdet = 22.0f; }   // HS 'SP n idx' ile gunceller
+  else if (m == APP_TABS)  { detents = 8;  Kdet = 22.0f; }   // HS 'TAB n idx' ile gunceller
   else                     { detents = 17; Kdet = 22.0f; }   // volume
   forcing = false;
   relAnchor = motor.shaft_angle;                 // goreli referans (ortalama bitince guncellenir)
@@ -427,6 +435,36 @@ static float hapticTorque(float a) {
   // Konum mutlak degil (relAnchor'a gore) -> mod gecisinde "konum=deger" cakismasi yok.
   if (mode == M_DETENT) {
     float sp = detentSpacing();
+    // --- PROFIL 1: SINUS (surekli, SICRAMA YOK) ---
+    // Mevcut testere profilinde tork sinirda aninda isaret degistiriyor:
+    //   sinir oncesi +Kdet*sp/2, sonrasi -Kdet*sp/2  ->  Kdet*sp buyuklugunde SICRAMA.
+    //   Kdet=22, sp=0.15 rad icin 3.3 V (tavanin %73'u!). Olculen 41-52 Hz salinimin kaynagi bu.
+    //   Sonum bunu sonduremez: sonum surekli bir kuvvet, sureksizlige carey degil.
+    // Sinus profilinde merkezde 0, ceyrekte tepe, sinirda yine 0 — gercek mekanik centik gibi.
+    // Merkez sertligi dtau/dtheta|0 = A*2pi/sp; A = Kdet*sp/(2pi) secilince MERKEZDEKI HIS AYNI
+    // kalir ama sinir sureksizligi tamamen kaybolur -> Kdet'i yukseltmek guvenli hale gelir.
+    if (detProfile == 1) {
+      float A = Kdet * sp / _2PI;
+      return -A * sinf(_2PI * (a - relAnchor) / sp);
+    }
+    // --- PROFIL 2: YUMUSATILMIS TESTERE ---
+    // Testerenin tik hissi sinirdaki ANI BIRAKMA'dan geliyor; sinus onu tamamen siliyor
+    // (Kdet 44'te bile tepe kuvvet 1.05 V < testere Kdet 22'nin 1.65 V'u).
+    // Burada centigin (1-2w) kadarlik kismi BIREBIR testere; son w'lik pencerede kuvvet
+    // sifira dogru iniyor. Boylece tepe kuvvet ~Kdet*sp*(0.5-w) korunuyor ama sinirdaki
+    // SONSUZ egim, sonlu ve AYARLANABILIR bir egime donusuyor (relW ile).
+    // relW=0 -> tam testere (eski davranis), relW=0.5 -> ucgen.
+    if (detProfile == 2) {
+      float u = (a - relAnchor) / sp;
+      u -= floorf(u + 0.5f);                    // [-0.5, 0.5) araligina sar
+      float w  = _constrain(relW, 0.001f, 0.49f);
+      float uc = 0.5f - w;                      // dogrusal bolgenin sonu
+      float au = fabsf(u), sgn = (u > 0) ? 1.0f : -1.0f;
+      float f;
+      if (au <= uc) f = Kdet * sp * au;                       // birebir testere
+      else          f = Kdet * sp * uc * (0.5f - au) / w;     // sifira yumusak inis
+      return -sgn * f;
+    }
     // MERKEZ SECIMINDE HISTEREZIS (27.08 olcumu).
     // Eskiden: c = relAnchor + roundf((a-relAnchor)/sp)*sp -> merkez tam ortada ANINDA
     // fliplenirdi. Knob sinira yakinken en ufak titresim hedefi BIR TAM CENTIK ileri-geri
@@ -466,6 +504,35 @@ static void focResume();  // ve devam ettir
 // Neden: SABIT sonum iki isi ayni anda yapamiyor — cinlamayi yutacak kadar buyutunce
 // durakta gurultuyu buyutup vizildatiyor (olculdu: b0.6 -> 3.7sn cinlama, b1.0 -> 142 yon degisimi).
 // Bu form dissipasyonu sadece gercek hareket varken uyguluyor.
+
+// ================= TAKIP GOZLEMLEYICISI (PLL / tracking observer) =================
+// Neden: hiz su an sonlu fark + 1. derece LPF (Tf) ile bulunuyor. LPF gecikme-gurultu
+// takasinda kotu: gecikmeyi dusurmek icin kesimi acinca nicemleme gurultusu geliyor.
+// Gozlemleyici 2. derece: ayni GECIKMEDE cok daha hizli suzuyor (40 dB/dec vs 20).
+//   V_est/V = ki / (s^2 + kp*s + ki),  kp = 2*bw, ki = bw^2  -> kritik sonumlu (zeta=1)
+//   Faz gecikmesi = -2*atan(w/bw)
+// Ornek 50 Hz'de: LPF(Tf=0.01) -> -72 derece;  gozlemleyici bw=2000 -> -18 derece.
+// Kararlilik: kp*dt < 1 sart (ODrive ayni korumayi koyar).
+// Kaynak: Sachs "Estimate Encoder Velocity Without Stupid Mistakes" II; ODrive encoder.cpp
+float obsBW  = 800.0f;    // rad/s — 'o <bw>'
+bool  useObs = true;      // 'O' ile ac/kapa
+static float    obsPos = 0, obsVel = 0;
+static uint32_t obsTs  = 0;
+
+static inline void obsUpdate(float angle) {
+  uint32_t now = micros();
+  float dt = (now - obsTs) * 1e-6f;
+  obsTs = now;
+  if (dt <= 0 || dt > 0.01f) { obsPos = angle; obsVel = 0; return; }   // ilk cagri / uzun bosluk
+  float kp = 2.0f * obsBW;
+  float ki = obsBW * obsBW;
+  if (kp * dt > 0.8f) { kp = 0.8f / dt; ki = 0.25f * kp * kp; }        // kararlilik korumasi
+  float d = angle - obsPos;
+  obsPos += dt * (obsVel + kp * d);
+  obsVel += dt * ki * d;
+}
+static inline float shaftVel() { return useObs ? obsVel : motor.shaft_velocity; }
+
 static inline float dampTorque(float vel) {
   float b = (dampRatio > 0) ? dampRatio * sqrtf(Kdet) : damping;   // sertlige bagli VEYA sabit
   float av = fabsf(vel);
@@ -605,6 +672,7 @@ static void handleLine(String s) {
   char c = s[0];
   String v = s.substring(1); v.trim();
   if (c=='v') { motor.voltage_limit = v.toFloat(); Serial.printf("voltage_limit=%.2f\n", motor.voltage_limit); }
+  else if (c=='s') { volSpacing = v.toFloat(); Serial.printf("volSpacing=%.3f rad (%.1f deg) -> sinus tepe kuvvet %.2f V\n", volSpacing, volSpacing*57.3f, Kdet*volSpacing/6.283f); }
   else if (c=='d') { detents = max(1, (int)v.toInt()); Serial.printf("detents=%d\n", detents); }
   else if (c=='k') { Kdet = v.toFloat(); Serial.printf("Kdet=%.2f\n", Kdet); }
   else if (c=='b') { damping = v.toFloat(); Serial.printf("damping=%.3f\n", damping); }
@@ -650,6 +718,10 @@ static void handleLine(String s) {
     Serial.println("BURST son");
     bIdx = -1;
   }
+  else if (c=='o') { obsBW = v.toFloat(); Serial.printf("obsBW=%.0f rad/s (%.0f Hz kesim; 50Hz'de faz %.0f derece)\n", obsBW, obsBW/6.283f, -2*atanf(314.0f/obsBW)*57.3f); }
+  else if (c=='O') { useObs = !useObs; Serial.printf("hiz kaynagi = %s\n", useObs ? "GOZLEMLEYICI" : "SimpleFOC LPF"); }
+  else if (c=='j') { relW = v.toFloat(); Serial.printf("relW=%.3f (tepe kuvvet ~%.2f V)\n", relW, Kdet*detentSpacing()*(0.5f-relW)); }
+  else if (c=='p') { detProfile = v.toInt(); Serial.printf("detProfile=%d (%s)\n", detProfile, detProfile ? "SINUS - surekli" : "testere - mevcut"); }
   else if (c=='r') { dampRatio = v.toFloat(); Serial.printf("dampRatio=%.4f -> Kdet=%.0f'de etkin sonum=%.3f (0=sabit '%s')\n", dampRatio, Kdet, dampRatio>0?dampRatio*sqrtf(Kdet):damping, "b"); }
   else if (c=='e') { phaseR = v.toFloat(); if (estMode) motor.phase_resistance = phaseR; Serial.printf("phaseR=%.2f ohm\n", phaseR); }
   else if (c=='Q') { motorKV = v.toFloat(); if (estMode) motor.KV_rating = motorKV; Serial.printf("KV=%.0f\n", motorKV); }
@@ -830,6 +902,7 @@ static void focStep() {
     }
     focIters++;
     motor.loopFOC();
+    obsUpdate(motor.shaft_angle);
     if (millis() < kickUntil) {   // TEKME: sabit tork darbesi, sonra birak
       lastT = kickDir * motor.voltage_limit;
       motor.move(lastT);
@@ -845,15 +918,15 @@ static void focStep() {
     prevDep = depState;
     if (depUpdate(t)) {
       // DEPLOY modu (kasa kilidi/kol) -> torku o uretir, normal haptik+HID atlanir
-    } else if (fabsf(motor.shaft_velocity) > 40.0f) {   // VELOCITY CUTOFF (SmartKnob): runaway yok
+    } else if (fabsf(shaftVel()) > 40.0f) {   // VELOCITY CUTOFF (SmartKnob): runaway yok
       t = 0;
     } else if (centering) {
       // MOD GECISI ORTALAMA: sabit hedef=fiziksel orta. NAZIK yay + GUCLU SONUM (overshoot/titreme YOK).
       float e = motor.shaft_angle - midA();
       t = -Kcenter * e;
-      t -= 0.35f * motor.shaft_velocity;   // DUSUK sonum: gurultu buyutup titretmez (yuksek sonum titreme enjekte eder)
-      bool reached     = fabsf(e) < 0.05f && fabsf(motor.shaft_velocity) < 0.5f;   // ortaya oturdu
-      bool pushingAway = (e * motor.shaft_velocity) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
+      t -= 0.35f * shaftVel();   // DUSUK sonum: gurultu buyutup titretmez (yuksek sonum titreme enjekte eder)
+      bool reached     = fabsf(e) < 0.05f && fabsf(shaftVel()) < 0.5f;   // ortaya oturdu
+      bool pushingAway = (e * shaftVel()) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
       if (reached || pushingAway || millis() - centerStart > 700) {
         centering = false;
         relAnchor = motor.shaft_angle;   // goreli grid'i knob'un su anki yerinden baslat
@@ -863,7 +936,7 @@ static void focStep() {
     } else {
       // TEK yol: yerel deterministik haptik. Sync ARTIK motoru surmez -> titreme/atlama yok.
       t = hapticTorque(motor.shaft_angle);
-      t -= dampTorque(motor.shaft_velocity);   // dampTorque icinde etkin sonum secilir
+      t -= dampTorque(shaftVel());   // dampTorque icinde etkin sonum secilir
     }
     float vmax = centering ? 2.5f : motor.voltage_limit;   // ortalama NAZIK (dusuk V, savasamaz)
     lastT = _constrain(t, -vmax, vmax);
@@ -872,7 +945,7 @@ static void focStep() {
     if (bIdx >= 0 && bIdx < BURST_N) {   // kayit (tam dongu hizinda)
       int i = bIdx;
       bAng[i] = (int16_t)_constrain(motor.shaft_angle*18000.0f/PI, -32000, 32000);
-      bVel[i] = (int16_t)_constrain(motor.shaft_velocity*100.0f,   -32000, 32000);
+      bVel[i] = (int16_t)_constrain(shaftVel()*100.0f,             -32000, 32000);
       bTrq[i] = (int16_t)_constrain(lastT*1000.0f,                 -32000, 32000);
       bIdx = i + 1; bT1 = micros();
     }
@@ -922,7 +995,7 @@ void setup() {
   motor.linkDriver(&driver);
 
   motor.controller    = MotionControlType::torque;   // tork = voltaj (akim sensoru yok)
-  motor.voltage_limit = 4.5f;                         // haptik tork tavani (L6234 ~1.8V dususu hesaba katilmis)
+  motor.voltage_limit = 5.0f;                         // haptik tork tavani (L6234 ~1.8V dususu hesaba katilmis)
   // Kalibrasyon SABIT kodlu (offset+yon asagida) -> hizalamaya yuksek voltaj GEREKMIYOR.
   // 5V idi: bootta 1-2sn boyunca motora DC basip guc kaynagini CC'ye sokuyordu.
   motor.voltage_sensor_align = 1.0f;
