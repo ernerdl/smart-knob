@@ -933,8 +933,20 @@ void loop() {
     float sp = detentSpacing();
     float d  = motor.shaft_angle - relAnchor;
     int step = 0;
-    if (d >  sp * 0.6f) step = +1;
-    else if (d < -sp * 0.6f) step = -1;
+    // YON DUYARLI HISTEREZIS (27.08 olcumu):
+    // Simetrik 0.6*sp esigi ile adim attiktan sonra knob yeni merkeze gore -0.4*sp'de
+    // kaliyor; ters esik -0.6*sp oldugu icin sadece 0.2*sp (=1.7 deg) geri hareket
+    // SAHTE bir ters adim uretiyordu. Supurmeyi bitirirken elin dogal geri gelisi
+    // her seferinde bunu tetikliyordu -> "sesi 5 artir 1 azalt" + hissedilen atlama.
+    // Cozum: ayni yonde devam UCUZ, yon degistirmek PAHALI.
+    static int lastStepDir = 0;
+    float thrFwd = sp * 0.6f;   // ayni yonde devam
+    float thrRev = sp * 1.0f;   // yon degistir: TAM bir centik geri gerek
+    float thrP = (lastStepDir >= 0) ? thrFwd : thrRev;   // ileri icin esik
+    float thrN = (lastStepDir <= 0) ? thrFwd : thrRev;   // geri icin esik
+    if (d >  thrP) step = +1;
+    else if (d < -thrN) step = -1;
+    if (step != 0) lastStepDir = step;
     if (step != 0) {
       relAnchor += step * sp;                             // referansi bir centik kaydir
       if (millis() - modeSwitchAt > 150) {
