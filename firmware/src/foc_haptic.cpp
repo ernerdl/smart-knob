@@ -188,6 +188,22 @@ float centerHyst  = 0.0f;    // haptik merkez histerezisi (x centik araligi).
                              // 0.53 -> 0.13, baskin frekans 47 -> 26 Hz) ama HIS daha kotuydu.
                              // Kod duruyor, 'X <k>' ile acilabilir. Karar hisle verildi.
 static float hapCenter = 0;  // mevcut centik merkezi — artik DURUM, anlik hesaplanmiyor
+// --- ESTIMATED CURRENT MODU (deneysel) ---
+// phase_resistance girilirse SimpleFOC target'i AKIM olarak yorumlar:
+//   voltage.q = target*R + voltage_bemf      (BLDCMotor.cpp:426)
+//   voltage_bemf = hiz/(KV*sqrt3)/RPM_TO_RADS   (sadece KV girilirse)
+// Yani KV girilince geri-EMK ILERI BESLEMEYLE telafi edilir -> tork hizdan bagimsiz
+// olur AMA motorun dogal elektriksel sonumu (b_elek = Ke, voltaj biriminde ~0.04)
+// da iptal olur. Bizim tek gercek sonumumuz o oldugu icin RISKLI. Test icin.
+// Sonum artik SERTLIGE BAGLI olabilir: B = dampRatio * sqrt(Kdet).
+// Gerekce: kritik sonum B_krit = 2*zeta*sqrt(K*J) -> sertligin KAREKOKUYLE olcekler.
+// dampRatio = 0 -> sabit 'damping' kullanilir (eski davranis).
+float dampRatio = 0.0f;
+float phaseR  = 2.75f;    // OLCULDU: faz-faz 5.51 ohm (uc kombinasyon da ayni) -> yildiz sarim, /2
+float motorKV = 140.0f;   // Motor etiketi: 2805, 140KV -> Ke = 1/(KV*sqrt3*RPM_TO_RADS) = 0.0394 V.s/rad
+bool  estMode = true;     // ACIK. Olculdu: 305 derece uctan uca savurma -> 238ms'de TAM durdu
+                          // (son 80ms hiz std = 0.000). Est kapaliyken cok daha az enerjiyle
+                          // hic durmuyordu. 'E' ile kapatilabilir.
 float revThrK = 0.6f;    // yon degistirme esigi (x centik araligi). 0.6=eski simetrik, 1.0=yeni
 float vHalf   = 1.2f;    // sonum devreye girme hizi (rad/s). |v|<<vHalf -> sonum ~0 (durakta vizilti yok)
                          // |v|>>vHalf -> tam sonum (cevirip birakinca cinlamayi yutar)
@@ -451,8 +467,9 @@ static void focResume();  // ve devam ettir
 // durakta gurultuyu buyutup vizildatiyor (olculdu: b0.6 -> 3.7sn cinlama, b1.0 -> 142 yon degisimi).
 // Bu form dissipasyonu sadece gercek hareket varken uyguluyor.
 static inline float dampTorque(float vel) {
+  float b = (dampRatio > 0) ? dampRatio * sqrtf(Kdet) : damping;   // sertlige bagli VEYA sabit
   float av = fabsf(vel);
-  return damping * vel * (av / (av + vHalf));
+  return b * vel * (av / (av + vHalf));
 }
 
 // --- HOMING: fiziksel duvarlari bul (HIZ-SINIRLI yaklasim -> duvara NAZIK dayanir, slam yok) ---
@@ -632,6 +649,22 @@ static void handleLine(String s) {
     for (int i = 0; i < n; i++) Serial.printf("%d %d %d\n", bAng[i], bVel[i], bTrq[i]);
     Serial.println("BURST son");
     bIdx = -1;
+  }
+  else if (c=='r') { dampRatio = v.toFloat(); Serial.printf("dampRatio=%.4f -> Kdet=%.0f'de etkin sonum=%.3f (0=sabit '%s')\n", dampRatio, Kdet, dampRatio>0?dampRatio*sqrtf(Kdet):damping, "b"); }
+  else if (c=='e') { phaseR = v.toFloat(); if (estMode) motor.phase_resistance = phaseR; Serial.printf("phaseR=%.2f ohm\n", phaseR); }
+  else if (c=='Q') { motorKV = v.toFloat(); if (estMode) motor.KV_rating = motorKV; Serial.printf("KV=%.0f\n", motorKV); }
+  else if (c=='E') {
+    estMode = !estMode;
+    if (estMode) {
+      motor.phase_resistance = phaseR;
+      motor.KV_rating        = motorKV;
+      motor.current_limit    = motor.voltage_limit / phaseR;
+    } else {
+      motor.phase_resistance = NOT_SET;
+      motor.KV_rating        = NOT_SET;
+    }
+    Serial.printf("estMode=%d  R=%.2f KV=%.0f  Ke=%.4f V.s/rad  (ilim=%.2f A)\n",
+      estMode, phaseR, motorKV, 1.0f/(motorKV*1.732f*0.10472f), motor.voltage_limit/phaseR);
   }
   else if (c=='X') { centerHyst = v.toFloat(); Serial.printf("centerHyst=%.2f (merkez %.2f x centik gecince degisir)\n", centerHyst, 0.5f+centerHyst); }
   else if (c=='Y') { revThrK = v.toFloat(); Serial.printf("revThrK=%.2f (yon degistirme esigi = %.2f x centik)\n", revThrK, revThrK); }
@@ -830,11 +863,11 @@ static void focStep() {
     } else {
       // TEK yol: yerel deterministik haptik. Sync ARTIK motoru surmez -> titreme/atlama yok.
       t = hapticTorque(motor.shaft_angle);
-      t -= dampTorque(motor.shaft_velocity);
+      t -= dampTorque(motor.shaft_velocity);   // dampTorque icinde etkin sonum secilir
     }
     float vmax = centering ? 2.5f : motor.voltage_limit;   // ortalama NAZIK (dusuk V, savasamaz)
     lastT = _constrain(t, -vmax, vmax);
-    motor.move(lastT);
+    motor.move(estMode ? lastT / phaseR : lastT);   // est modda target = AKIM
     if (bIdx == -2 && fabsf(motor.shaft_velocity) > bTrigV) { bIdx = 0; bT0 = micros(); }   // tetik
     if (bIdx >= 0 && bIdx < BURST_N) {   // kayit (tam dongu hizinda)
       int i = bIdx;
@@ -919,6 +952,13 @@ void setup() {
   motor.sensor_direction    = Direction::CCW;
   Serial.println("initFOC (SABIT kalibrasyon: offset=0.227 dir=CCW)...");
   motor.initFOC();
+  if (estMode) {   // estimated current: target = AKIM, voltage.q = target*R + geri-EMK telafisi
+    motor.phase_resistance = phaseR;
+    motor.KV_rating        = motorKV;
+    motor.current_limit    = motor.voltage_limit / phaseR;
+    Serial.printf("EST modu ACIK: R=%.2f ohm KV=%.0f -> Ke=%.4f V.s/rad\n",
+                  phaseR, motorKV, 1.0f/(motorKV*1.732f*0.10472f));
+  }
   Serial.printf("initFOC bitti. zero_offset=%.3f dir=%d  (sabit kod icin not al)\n",
                 motor.zero_electric_angle, motor.sensor_direction);
 
