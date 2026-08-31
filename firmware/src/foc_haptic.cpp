@@ -193,6 +193,7 @@ static int16_t  bTrq[BURST_N];   // tork, 0.001 V birim
 static volatile int bIdx = -1;   // -1 = kapali, -2 = TETIK BEKLIYOR
 static float bTrigV = 8.0f;      // tetik hizi (rad/s)
 static uint32_t bT0 = 0, bT1 = 0;   // bT1 = SON ornegin zamani (dolum bitisi)
+float fwdThrK = 0.85f;   // adim/HID tetikleme esigi (x centik araligi). 'F <k>' ile ayarlanir.
 int   knobDir = -1;      // kullaniciya donuk cevirme yonu (+1/-1). 'N' ile ters cevrilir.
                          // 31.08: sensor yeniden monte edilince yon tersine dondu.
 float centerHyst  = 0.0f;    // haptik merkez histerezisi (x centik araligi).
@@ -775,6 +776,7 @@ static void handleLine(String s) {
   else if (c=='o') { obsBW = v.toFloat(); Serial.printf("obsBW=%.0f rad/s (%.0f Hz kesim; 50Hz'de faz %.0f derece)\n", obsBW, obsBW/6.283f, -2*atanf(314.0f/obsBW)*57.3f); }
   else if (c=='O') { useObs = !useObs; Serial.printf("hiz kaynagi = %s\n", useObs ? "GOZLEMLEYICI" : "SimpleFOC LPF"); }
   else if (c=='j') { relW = v.toFloat(); Serial.printf("relW=%.3f (tepe kuvvet ~%.2f V)\n", relW, Kdet*detentSpacing()*(0.5f-relW)); }
+  else if (c=='F') { fwdThrK = v.toFloat(); Serial.printf("fwdThrK=%.2f (HID centigin %%%.0f'inde tetiklenir)\n", fwdThrK, fwdThrK*100); }
   else if (c=='N') { knobDir = -knobDir; Serial.printf("knobDir=%+d (cevirme yonu %s)\n", knobDir, knobDir>0?"NORMAL":"TERS"); }
   else if (c=='p') { detProfile = v.toInt(); Serial.printf("detProfile=%d (%s)\n", detProfile, detProfile ? "SINUS - surekli" : "testere - mevcut"); }
   else if (c=='r') { dampRatio = v.toFloat(); Serial.printf("dampRatio=%.4f -> Kdet=%.0f'de etkin sonum=%.3f (0=sabit '%s')\n", dampRatio, Kdet, dampRatio>0?dampRatio*sqrtf(Kdet):damping, "b"); }
@@ -1164,7 +1166,11 @@ void loop() {
     // Cozum: ayni yonde devam UCUZ, yon degistirmek PAHALI.
     // 'Y' komutu ile ESKI simetrik davranisa donulebilir (A/B karsilastirma icin).
     static int lastStepDir = 0;
-    float thrFwd = sp * 0.6f;                        // ayni yonde devam
+    // fwdThrK: adimin (ve HID'in) hangi noktada tetiklenecegi, centik araliginin kati.
+    // 0.5'te haptik merkez zaten atliyor, 1.0'da knob yeni centige OTURUYOR.
+    // 0.6 ise komut, tik tamamlanmadan gidiyordu -> "erken" hissi (31.08).
+    // 0.85 = tik neredeyse bitmisken tetikle.
+    float thrFwd = sp * fwdThrK;                     // ayni yonde devam
     float thrRev = sp * revThrK;                     // yon degistir ('Y <k>' ile ayarlanir; 0.6=eski simetrik)
     float thrP = (lastStepDir >= 0) ? thrFwd : thrRev;   // ileri icin esik
     float thrN = (lastStepDir <= 0) ? thrFwd : thrRev;   // geri icin esik
