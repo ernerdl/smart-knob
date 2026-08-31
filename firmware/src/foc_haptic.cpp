@@ -736,9 +736,14 @@ static void handleLine(String s) {
     int pp = v.toInt();
     if (pp > 0) {
       motor.pole_pairs = pp;
-      Serial.printf("pole_pairs=%d -> re-initFOC...\n", pp);
+      Serial.printf("pole_pairs=%d -> ZORLA yeniden kalibrasyon...\n", pp);
       focPause();
       motor.move(0);
+      // Sabit kodlu degerleri TEMIZLE, yoksa SimpleFOC kalibrasyonu ATLAR.
+      // Sensor yeniden monte edildiginde (braket degisimi) eski offset gecersizdir:
+      // yanlis elektriksel aci -> tork yanlis yonde -> vizilti + bozuk centik.
+      motor.zero_electric_angle = NOT_SET;
+      motor.sensor_direction    = Direction::UNKNOWN;
       motor.initFOC();
       Serial.printf("bitti: offset=%.3f dir=%d\n", motor.zero_electric_angle, motor.sensor_direction);
       focResume();
@@ -1068,9 +1073,13 @@ void setup() {
   // SABIT KALIBRASYON: otomatik hizalama guvenilmezdi (bazen PP check fail -> FOC olu, centik yok).
   // Iki temiz olcumun degeri: offset 0.214 ve 0.240, yon CCW -> ortalama 0.227.
   // Boylece acilista motor OYNAMAZ ve her acilis AYNI his. ('P 7' ile otomatige donulebilir.)
-  motor.zero_electric_angle = 0.227f;
-  motor.sensor_direction    = Direction::CCW;
-  Serial.println("initFOC (SABIT kalibrasyon: offset=0.227 dir=CCW)...");
+  // 31.08: braket yenilendi, sensor yeniden monte edildi -> ESKI degerler (0.227/CCW)
+  // GECERSIZ kaldi. Yanlis elektriksel aci = tork yanlis yonde = vizilti + bozuk centik.
+  // Uc ardisik 'P 7' kalibrasyonu: 1.304 / 1.304 / 1.315 (yayilim 0.011), yon CW.
+  // KURAL: sensor/braket her sokuldugunde 'P 7' ile yeniden kalibre et ve buraya yaz.
+  motor.zero_electric_angle = 1.308f;
+  motor.sensor_direction    = Direction::CW;
+  Serial.println("initFOC (SABIT kalibrasyon: offset=1.308 dir=CW)...");
   motor.initFOC();
   if (estMode) {   // estimated current: target = AKIM, voltage.q = target*R + geri-EMK telafisi
     motor.phase_resistance = phaseR;
