@@ -193,6 +193,8 @@ static int16_t  bTrq[BURST_N];   // tork, 0.001 V birim
 static volatile int bIdx = -1;   // -1 = kapali, -2 = TETIK BEKLIYOR
 static float bTrigV = 8.0f;      // tetik hizi (rad/s)
 static uint32_t bT0 = 0, bT1 = 0;   // bT1 = SON ornegin zamani (dolum bitisi)
+int   knobDir = -1;      // kullaniciya donuk cevirme yonu (+1/-1). 'N' ile ters cevrilir.
+                         // 31.08: sensor yeniden monte edilince yon tersine dondu.
 float centerHyst  = 0.0f;    // haptik merkez histerezisi (x centik araligi).
                              // DENENDI ve KAPATILDI (27.08): olcum lehineydi (sinir gecisi/derece
                              // 0.53 -> 0.13, baskin frekans 47 -> 26 Hz) ama HIS daha kotuydu.
@@ -773,6 +775,7 @@ static void handleLine(String s) {
   else if (c=='o') { obsBW = v.toFloat(); Serial.printf("obsBW=%.0f rad/s (%.0f Hz kesim; 50Hz'de faz %.0f derece)\n", obsBW, obsBW/6.283f, -2*atanf(314.0f/obsBW)*57.3f); }
   else if (c=='O') { useObs = !useObs; Serial.printf("hiz kaynagi = %s\n", useObs ? "GOZLEMLEYICI" : "SimpleFOC LPF"); }
   else if (c=='j') { relW = v.toFloat(); Serial.printf("relW=%.3f (tepe kuvvet ~%.2f V)\n", relW, Kdet*detentSpacing()*(0.5f-relW)); }
+  else if (c=='N') { knobDir = -knobDir; Serial.printf("knobDir=%+d (cevirme yonu %s)\n", knobDir, knobDir>0?"NORMAL":"TERS"); }
   else if (c=='p') { detProfile = v.toInt(); Serial.printf("detProfile=%d (%s)\n", detProfile, detProfile ? "SINUS - surekli" : "testere - mevcut"); }
   else if (c=='r') { dampRatio = v.toFloat(); Serial.printf("dampRatio=%.4f -> Kdet=%.0f'de etkin sonum=%.3f (0=sabit '%s')\n", dampRatio, Kdet, dampRatio>0?dampRatio*sqrtf(Kdet):damping, "b"); }
   else if (c=='e') { phaseR = v.toFloat(); if (estMode) motor.phase_resistance = phaseR; Serial.printf("phaseR=%.2f ohm\n", phaseR); }
@@ -1169,17 +1172,22 @@ void loop() {
     else if (d < -thrN) step = -1;
     if (step != 0) lastStepDir = step;
     if (step != 0) {
-      relAnchor += step * sp;                             // referansi bir centik kaydir
+      relAnchor += step * sp;                             // referansi bir centik kaydir (FIZIKSEL yon)
+      // Kullaniciya donuk yon AYRI: 31.08'de sensor yeniden monte edilince
+      // sensor_direction CCW -> CW dondu ve cevirme yonu tersine gecti. FOC
+      // kalibrasyonu (olculmus deger) DOGRU, o yuzden ona dokunmuyoruz; sadece
+      // sayim/HID/LED yonunu ceviriyoruz. 'Y' degil, 'N' komutu ile degistirilir.
+      int uStep = step * knobDir;
       if (millis() - modeSwitchAt > 150) {
-        pendingHid += step; lastUserMove = millis();
+        pendingHid += uStep; lastUserMove = millis();
         if (barMode()) {                                  // ses/parlaklik: LED bar seviyesi (0..detents-1)
-          level = constrain(level + step, 0, detents - 1);
+          level = constrain(level + uStep, 0, detents - 1);
           updateLED(level);
         } else if (appMode == APP_SCROLL) {               // scroll: donen nokta (wrap)
-          dispIdx = (dispIdx + step + NLED) % NLED;
+          dispIdx = (dispIdx + uStep + NLED) % NLED;
           updateLED(dispIdx);
         } else {                                          // space/tabs: aktif index (iyimser; HS teyit eder)
-          dispIdx = constrain(dispIdx + step, 0, detents - 1);
+          dispIdx = constrain(dispIdx + uStep, 0, detents - 1);
           updateLED(dispIdx);
         }
       }
