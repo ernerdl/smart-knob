@@ -41,6 +41,21 @@ static void handleLine(String s) {
   if (s == "s") { target = 0; motor.disable(); autoStopped = true;   // STOP: surucuyu GERCEKTEN kes (acik dongude tutma akimi ISITIR)
                  Serial.println("STOP (surucu kapatildi)"); printStatus(); return; }
   if (s == "?") { printStatus(); return; }
+  if (s.startsWith("p")) {   // FAZ TESTI: uc cikisa SABIT ve FARKLI voltaj bas
+    // Amac: her fazin gercekten surulup surulmedigini multimetreyle ayirt etmek.
+    // Duty oranlari sabit -> cikislarda olculebilir DC ortalama olusur.
+    // Fazlar arasi en buyuk fark 2V, 5.51 ohm ile ~0.36A -> kisa sureli guvenli.
+    motor.disable();
+    driver.setPwm(1.0f, 2.0f, 3.0f);
+    autoStopped = true;   // oto-stop bunu kesmesin diye hedefi sifirla
+    target = 0;
+    Serial.println("FAZ TESTI acik — cikislar SABIT:");
+    Serial.println("  OUT1 (GPIO15) ~1.0V   OUT2 (GPIO16) ~2.0V   OUT3 (GPIO17) ~3.0V");
+    Serial.println("  Her motor telinde GND'ye gore DC volt olc. Ucu de FARKLI olmali.");
+    Serial.println("  Ikisi ayni ya da biri 0V/12V ise o faz surulmuyor.");
+    Serial.println("  Bitirmek icin: s");
+    return;
+  }
   if (s.startsWith("t")) {
     target = s.substring(1).toFloat();
     Serial.printf("hedef -> %.2f rad/s\n", target);

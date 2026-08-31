@@ -242,21 +242,29 @@ static int   detentIndex(float a) {
   return constrain(i, 0, detents - 1);
 }
 static bool barMode() { return appMode == APP_VOLUME || appMode == APP_BRIGHTNESS; }  // dolan-bar modlari (ses/parlaklik)
+// LED0 ARIZALI (31.08): ilk WS2812'nin ISIK kati olu, ama VERI aktarma kati saglam
+// (arkasindaki 15 LED normal yaniyor). Bu yuzden fiziksel index 0 KULLANILMIYOR;
+// gosterge 1..NLED-1 arasina yayiliyor. Cip degistirilirse LED_OFF'u 0 yap.
+#define LED_OFF   1                 // ilk kullanilabilir fiziksel index
+#define NLED_USE  (NLED - LED_OFF)  // kullanilabilir LED sayisi (15)
+static inline CRGB& L(int i) { return leds[LED_OFF + ((i % NLED_USE) + NLED_USE) % NLED_USE]; }
+
 static void updateLED(int lv) {
   CRGB base = colBase[appMode], act = colActive[appMode];
+  leds[0] = CRGB::Black;   // arizali LED: her zaman kapali
   if (barMode()) {                             // dolan bar: seviyeye kadar aktif renk
-    for (int i = 0; i < NLED; i++) leds[i] = (i < lv) ? act : base;
+    for (int i = 0; i < NLED_USE; i++) L(i) = (i < lv) ? act : base;
   } else if (appMode == APP_SCROLL) {          // SCROLL: donen tek nokta (gorsel geri bildirim)
-    fill_solid(leds, NLED, base);
-    leds[((lv % NLED) + NLED) % NLED] = act;
+    for (int i = 0; i < NLED_USE; i++) L(i) = base;
+    L(lv) = act;
   } else {                                     // SPACES: n centik ORTADA, esit aralikli, AYRI LED'ler (cakisma yok)
-    fill_solid(leds, NLED, base);
-    int spacing = ((detents - 1) * 2 <= NLED - 1) ? 2 : 1;      // aralik 2 LED (sigmazsa 1)
+    for (int i = 0; i < NLED_USE; i++) L(i) = base;
+    int spacing = ((detents - 1) * 2 <= NLED_USE - 1) ? 2 : 1;   // aralik 2 LED (sigmazsa 1)
     int width   = (detents - 1) * spacing;
-    int start   = (int)roundf((NLED - 1) / 2.0f - width / 2.0f); // ring ortasina yasla
+    int start   = (int)roundf((NLED_USE - 1) / 2.0f - width / 2.0f);
     for (int k = 0; k < detents; k++) {
-      int p = constrain(start + k * spacing, 0, NLED - 1);
-      leds[p] = (k == lv) ? act : (base + CRGB(0,15,30));       // aktif centik = yesil, digerleri sonuk mavi
+      int p = constrain(start + k * spacing, 0, NLED_USE - 1);
+      L(p) = (k == lv) ? act : (base + CRGB(0,15,30));           // aktif centik = yesil, digerleri sonuk mavi
     }
   }
   FastLED.show();
@@ -702,6 +710,16 @@ static void handleLine(String s) {
   else if (c=='S') { stream = !stream; Serial.printf("stream=%d\n", stream); }
   else if (c=='D') { dbgStep = !dbgStep; Serial.printf("dbgStep=%d\n", dbgStep); }
   else if (c=='H') { focPause(); home(); focResume(); }
+  else if (c=='W') {   // SUREKLI LED yenileme (15 sn) — pede dokunarak test icin
+    Serial.println("LED surekli yenileniyor (15 sn). Veri kablosunu pedlere dokundurup izle.");
+    uint32_t t0 = millis();
+    while (millis() - t0 < 15000) {
+      fill_solid(leds, NLED, CRGB(120,120,120));
+      FastLED.show();
+      delay(20);   // ~50 Hz yenileme
+    }
+    Serial.println("bitti");
+  }
   else if (c=='Z') {   // GPIO4 KARE DALGA: multimetreyle pin+kablo testi (1 Hz, 10 sn)
     Serial.println("GPIO4 yavas yanip sonuyor (10 sn). DIN ucunda DC volt olc:");
     Serial.println("  0V <-> 3.3V arasi gidip geliyorsa PIN ve KABLO SAGLAM.");
