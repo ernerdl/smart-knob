@@ -624,6 +624,13 @@ static void handleLine(String s) {
     Serial.printf("appMode=%d detents=%d\n", (int)appMode, detents);
     return;
   }
+  if (s == "HIDTEST") {   // HID zincirini TEK BASINA test et: bir adim gonder
+    Serial.printf("HIDTEST: appMode=%d -> sendStep(+1)\n", (int)appMode);
+    sendStep(+1);
+    delay(30); Consumer.release(); Keyboard.releaseAll(); hidReleaseAt = 0;
+    Serial.println("HIDTEST bitti");
+    return;
+  }
   if (s == "SYNC") {
     // HS yeniden yuklendiginde mod senkronu KOPUYORDU: HS'in knobMode'u her reload'da
     // "volume"a doner ve knob'a SORAMAZ (HS seri OKUMUYOR, modu sadece HID F-tuslarindan
@@ -851,7 +858,10 @@ static void handleLine(String s) {
     delay(500);
     Serial.printf("FOC dongu = %lu Hz\n", (unsigned long)((focIters - n0) * 1000UL / (millis() - t0)));
   }
-  else if (c=='?') Serial.printf("STATUS aci=%.3f rad (%.1f deg) mode=%s vlim=%.2f detents=%d\n",
+  else if (c=='?') Serial.printf("GATE pending=%d hidRel=%lu forcing=%d nextIn=%ld modeYasi=%lu appMode=%d\n",
+                                  pendingHid, (unsigned long)hidReleaseAt, (int)forcing,
+                                  (long)(nextStepAt - millis()), (unsigned long)(millis() - modeSwitchAt), (int)appMode),
+                    Serial.printf("STATUS aci=%.3f rad (%.1f deg) mode=%s vlim=%.2f detents=%d\n",
                                  motor.shaft_angle, motor.shaft_angle*180.0f/PI, modeName(), motor.voltage_limit, detents);
   else Serial.printf("bilinmeyen: %s\n", s.c_str());
 }
