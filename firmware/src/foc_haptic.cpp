@@ -34,6 +34,15 @@ USBHIDMouse           Mouse;      // fare tekeri (scroll modu — her uygulamada
 // Uygulama modu: knob ne kontrol ediyor (knob-modu olan aksiyonlar)
 enum AppMode { APP_VOLUME, APP_SPACES, APP_TABS, APP_BRIGHTNESS, APP_SCROLL };   // ses/masaustu/chrome/parlaklik/scroll
 static AppMode appMode = APP_VOLUME;
+// --- HS'ten gelen durum ONBELLEGI (01.09) ---
+// Eskiden HS SADECE aktif modun verisini gonderiyordu (onVol/onBright/onSpace hepsi
+// "bu modda degilsek cik" ile basliyordu). Sonuc: moda gecince knob once kendi eski
+// tahminini gosterip, HS verisi gelince duzeliyordu -> gorunur gecikme/yanlis deger.
+// Artik HS her modun verisini surekli gonderiyor; knob hepsini burada sakliyor ve
+// mod degisince HAZIR olani aninda gosteriyor. -1 = henuz bilinmiyor.
+static int stVol = -1, stBr = -1;
+static int stSpN = -1, stSpIdx = -1;
+static int stTabN = -1, stTabIdx = -1;
 CRGB leds[NLED];                   // FastLED (RMT, TinyUSB ile uyumlu)
 // Moda gore renk: [0]=VOLUME [1]=SPACES [2]=TABS [3]=BRIGHTNESS [4]=SCROLL
 static CRGB colBase[5]   = { CRGB(0,0,0),   CRGB(0,8,20),  CRGB(20,8,0),  CRGB(20,20,0), CRGB(15,0,20) };   // ses/mavi/turuncu/sari/mor
@@ -303,9 +312,21 @@ static void sendStep(int dir) {
 // Mod uygula (MODE komutu VE PCF butonu ayni yoldan kullanir)
 static void applyMode(AppMode m) {
   appMode = m;
-  if (m == APP_SPACES)     { detents = 3;  Kdet = 22.0f; }   // HS 'SP n idx' ile gunceller
-  else if (m == APP_TABS)  { detents = 8;  Kdet = 22.0f; }   // HS 'TAB n idx' ile gunceller
-  else                     { detents = 17; Kdet = 22.0f; }   // volume
+  // Onbellekten YUKLE: HS'i beklemeden dogru degeri goster (yoksa -1 -> makul varsayilan)
+  if (m == APP_SPACES) {
+    detents = (stSpN  > 0) ? stSpN  : 3;
+    if (stSpIdx  >= 0) dispIdx = constrain(stSpIdx,  0, detents - 1);
+  } else if (m == APP_TABS) {
+    detents = (stTabN > 0) ? stTabN : 8;
+    if (stTabIdx >= 0) dispIdx = constrain(stTabIdx, 0, detents - 1);
+  } else if (m == APP_BRIGHTNESS) {
+    detents = 17;
+    if (stBr  >= 0) level = constrain(stBr,  0, detents - 1);
+  } else {
+    detents = 17;
+    if (stVol >= 0) level = constrain(stVol, 0, detents - 1);
+  }
+  Kdet = 22.0f;
   forcing = false;
   relAnchor = motor.shaft_angle;                 // goreli referans (ortalama bitince guncellenir)
   updateLED(appMode == APP_VOLUME ? level : dispIdx);
@@ -623,8 +644,10 @@ static void handleLine(String s) {
   if (s.startsWith("SP")) {   // SP <n> <idx> : space sayisi + aktif index (Hammerspoon otomatik)
     int n = 0, idx = 0; sscanf(s.c_str() + 2, "%d %d", &n, &idx);
     if (n >= 1) {
-      appMode = APP_SPACES; detents = n; dispIdx = constrain(idx, 0, n - 1);
-      updateLED(dispIdx);   // motoru SURMEZ; sadece LED aktif space'i gosterir (kozmetik)
+      stSpN = n; stSpIdx = constrain(idx, 0, n - 1);                     // HER ZAMAN sakla
+      if (appMode == APP_SPACES) {   // MOD DEGISTIRMEZ — yoksa surekli gelen veri modu zorlardi
+        detents = n; dispIdx = stSpIdx; updateLED(dispIdx);
+      }
     }
     Serial.printf("SP n=%d idx=%d\n", n, idx);
     return;
@@ -632,8 +655,8 @@ static void handleLine(String s) {
   if (s.startsWith("TAB")) {   // TAB <n> <idx> : chrome sekme sayisi + aktif index (Hammerspoon)
     int n = 0, idx = 0; sscanf(s.c_str() + 3, "%d %d", &n, &idx);
     if (n >= 1) {
-      appMode = APP_TABS; detents = n; dispIdx = constrain(idx, 0, n - 1);
-      updateLED(dispIdx);   // motoru SURMEZ; sadece LED aktif sekmeyi gosterir (kozmetik)
+      stTabN = n; stTabIdx = constrain(idx, 0, n - 1);                   // HER ZAMAN sakla
+      if (appMode == APP_TABS) { detents = n; dispIdx = stTabIdx; updateLED(dispIdx); }
     }
     Serial.printf("TAB n=%d idx=%d\n", n, idx);
     return;
@@ -675,16 +698,18 @@ static void handleLine(String s) {
       colActive[appMode].r, colActive[appMode].g, colActive[appMode].b);
     return;
   }
-  if (s.startsWith("VOL")) {   // Mac ses senkronu -> SADECE LED barini boyar (motoru SURMEZ, savas yok)
-    if (appMode != APP_VOLUME) return;
-    int n = constrain((int)s.substring(3).toInt(), 0, detents - 1);
-    if (millis() - lastUserMove > 400) { level = n; updateLED(level); }   // kullanici cevirmiyorken senkronla
+  if (s.startsWith("VOL")) {   // Mac ses senkronu -> SADECE LED barini boyar (motoru SURMEZ)
+    stVol = constrain((int)s.substring(3).toInt(), 0, 16);               // HER ZAMAN sakla
+    if (appMode == APP_VOLUME && millis() - lastUserMove > 400) {        // aktifse goster
+      level = constrain(stVol, 0, detents - 1); updateLED(level);
+    }
     return;
   }
   if (s.startsWith("BR")) {    // parlaklik senkronu (HS) -> LED bar (motoru SURMEZ)
-    if (appMode != APP_BRIGHTNESS) return;
-    int n = constrain((int)s.substring(2).toInt(), 0, detents - 1);
-    if (millis() - lastUserMove > 400) { level = n; updateLED(level); }
+    stBr = constrain((int)s.substring(2).toInt(), 0, 16);                // HER ZAMAN sakla
+    if (appMode == APP_BRIGHTNESS && millis() - lastUserMove > 400) {
+      level = constrain(stBr, 0, detents - 1); updateLED(level);
+    }
     return;
   }
   if (s.startsWith("BTNMAP?")) {   // haritayi dok (UI cekmek icin)
