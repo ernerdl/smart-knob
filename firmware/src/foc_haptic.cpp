@@ -603,6 +603,23 @@ static void handleLine(String s) {
     Serial.printf("appMode=%d detents=%d\n", (int)appMode, detents);
     return;
   }
+  if (s == "SYNC") {
+    // HS yeniden yuklendiginde mod senkronu KOPUYORDU: HS'in knobMode'u her reload'da
+    // "volume"a doner ve knob'a SORAMAZ (HS seri OKUMUYOR, modu sadece HID F-tuslarindan
+    // ogreniyor). Knob ise kendi modunda kalir -> HS yanlis modu yoklar, ekran bayat kalir.
+    // Bu komut knob'a mevcut modunu HID ile TEKRAR duyurtur; HS aciliste cagirir.
+    uint8_t k = 0;
+    switch (appMode) {
+      case APP_VOLUME:     k = KEY_F16; break;
+      case APP_SPACES:     k = KEY_F17; break;
+      case APP_BRIGHTNESS: k = KEY_F14; break;
+      case APP_TABS:       k = KEY_F18; break;
+      default: break;                    // SCROLL: HS tarafinda karsiligi yok
+    }
+    if (k) { Keyboard.press(k); delay(5); Keyboard.releaseAll(); }
+    Serial.printf("SYNC -> appMode=%d detents=%d\n", (int)appMode, detents);
+    return;
+  }
   if (s.startsWith("SP")) {   // SP <n> <idx> : space sayisi + aktif index (Hammerspoon otomatik)
     int n = 0, idx = 0; sscanf(s.c_str() + 2, "%d %d", &n, &idx);
     if (n >= 1) {
