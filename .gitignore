@@ -9,3 +9,7 @@ firmware/.pio/
 # Python
 __pycache__/
 *.pyc
+
+# Hammerspoon kisisel ayarlar (sunucu adresi vb.) — asla commit etme
+knob_secrets.lua
+*.secrets.lua

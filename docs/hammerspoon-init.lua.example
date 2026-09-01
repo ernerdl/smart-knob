@@ -1,0 +1,332 @@
+-- SmartKnob — Mac entegrasyonu (C modeli: mode-entry sync)
+-- Mod knob'ta (PCF butonu) VEYA HS hotkey (Cmd+Alt+Ctrl+K) ile degisir.
+-- HER MOD GIRISINDE HS o an ki durumu yollar: volume->VOL <0..16>, spaces->SP <n> <idx>.
+-- HS knob'un serial cikisini okur (cat) -> buton basinca "mod=X" yakalar.
+
+require("hs.ipc")
+local M = {}
+M.knobMode = "volume"          -- knob firmware modu (serial'dan / hotkey'den takip edilir)
+
+-- ---------- port + gonderme ----------
+local function knobPort()
+  local o = hs.execute("ls /dev/cu.usbmodem* 2>/dev/null | grep -v 1101 | grep -v 2101 | head -1")
+  return (o or ""):gsub("%s+$", "")
+end
+
+local function sendLine(line)
+  local p = knobPort()
+  if p == "" then return end
+  hs.task.new("/bin/sh", nil, {"-c", string.format("printf '%s\\n' > %s", line, p)}):start()
+end
+
+-- ---------- durum kaynaklari ----------
+local function volLevel()
+  local d = hs.audiodevice.defaultOutputDevice()
+  if not d or d:muted() then return 0 end
+  return math.floor((d:volume() or 0) / 100 * 16 + 0.5)   -- 0..16
+end
+
+-- Parlaklik okuma (Apple Silicon):
+--   hs.brightness.get() bu makinede HER ZAMAN nil doner (dahili ekranda bile).
+--   AppleARMBacklight dugumu sabit deger tutuyor, parlaklik tusuna basinca DEGISMIYOR.
+--   Gercekten takip eden tek alan: IOMFBBrightnessLevel (sinif IOMobileFramebufferShim).
+--   Dar sinif sorgusu 40 ms; "ioreg -l" tum agac 1.2 sn (0.7 sn'lik yoklamada kullanilamaz).
+-- ONEMLI: deger ile macOS kaydiricisi DOGRUSAL DEGIL. Ust kademelerde fark milyonlarca,
+-- alt kademelerde her adim neredeyse yariya iniyor. Bu yuzden oran hesabi YANLIS sonuc
+-- veriyordu (ekran 0'dayken knob %25 gosteriyordu). Asagidaki tablo 16 kademenin hepsi
+-- olculerek cikarildi. BASKA MAKINEDE FARKLI OLUR — parlaklik tusuyla tavandan tabana
+-- inip her adimda degeri okuyarak yeniden olc.
+local BR_STEPS = {          -- [kademe 0..16] = IOMFBBrightnessLevel
+  [0]=0,        [1]=65536,     [2]=132760,    [3]=268942,   [4]=544815,
+  [5]=1103668,  [6]=2235776,   [7]=4529166,   [8]=9175040,  [9]=10210460,
+  [10]=11452454,[11]=12942232, [12]=14729231, [13]=16872758,[14]=19443924,
+  [15]=22528068,[16]=26227508,
+}
+local function brLevel()   -- ekran parlakligi 0..16 (okunamazsa nil -> LED'e dokunma)
+  local o = hs.execute([[ioreg -c IOMobileFramebufferShim -r -w 0 2>/dev/null | grep -m1 -o '"IOMFBBrightnessLevel" = [0-9]*']])
+  local v = o and o:match("= (%d+)")
+  if not v then return nil end
+  v = tonumber(v)
+  if not v then return nil end
+  local best, bestd = 0, math.huge          -- tabloda en yakin kademeyi bul
+  for lv = 0, 16 do
+    local d = math.abs(BR_STEPS[lv] - v)
+    if d < bestd then best, bestd = lv, d end
+  end
+  return best
+end
+-- Parlaklik = SISTEM parlaklik tusu olayi (klavye parlaklik tusu gibi; hangi ekransa macOS uygular).
+-- hs.brightness harici monitorde calismiyor (get=nil) -> bu yol daha saglam.
+local function brKey(up)
+  hs.eventtap.event.newSystemKeyEvent(up and "BRIGHTNESS_UP" or "BRIGHTNESS_DOWN", true):post()
+  hs.eventtap.event.newSystemKeyEvent(up and "BRIGHTNESS_UP" or "BRIGHTNESS_DOWN", false):post()
+
+  -- parlaklik degisti: olay yok, o yuzden KISA gecikmeyle kendimiz okuyup yolluyoruz
+  hs.timer.doAfter(0.12, function() if M.onBrightNow then M.onBrightNow() end end)
+end
+
+local function spacesInfo()   -- mouse'un ekranindaki TUM space (masaustu+fullscreen) sayisi + aktif idx
+  if not hs.spaces then return nil end
+  local scr = hs.mouse.getCurrentScreen() or hs.screen.mainScreen()
+  if not scr then return nil end
+  local u = scr:getUUID()
+  local all = hs.spaces.allSpaces()
+  local act = hs.spaces.activeSpaces()
+  if not (all and all[u]) then return nil end
+  local list = all[u]
+  local idx = 0
+  for i, sid in ipairs(list) do if sid == act[u] then idx = i - 1; break end end
+  return #list, idx
+end
+
+-- Chrome'un ON penceresindeki sekme sayisi + aktif index (Chrome-KILITLI: odak gerekmez)
+local function tabsInfo()
+  local ok, res = hs.osascript.applescript([[
+    tell application "Google Chrome"
+      if (count of windows) = 0 then return "0 0"
+      set w to front window
+      return ((count of tabs of w) as string) & " " & (((active tab index of w) - 1) as string)
+    end tell]])
+  if ok and res then
+    local n, idx = tostring(res):match("(%d+)%s+(%d+)")
+    if n and tonumber(n) >= 1 then return tonumber(n), tonumber(idx) end
+  end
+  return nil
+end
+
+-- Chrome sekmesini AppleScript ile degistir (Chrome odakta OLMASA da calisir, wrap'li)
+local function chromeTab(dir)
+  hs.osascript.applescript(string.format([[
+    tell application "Google Chrome"
+      if (count of windows) = 0 then return
+      set w to front window
+      set n to count of tabs of w
+      set t to active tab index of w
+      set active tab index of w to (((t - 1 + (%d) + n) mod n) + 1)
+    end tell]], dir))
+end
+
+-- ---------- mod girisinde durumu yolla (C'nin kalbi) ----------
+local lastV, lastN, lastIdx = -1, -1, -1
+local function pushState()
+  if M.knobMode == "volume" then
+    local v = volLevel(); lastV = v
+    sendLine("VOL " .. v); hs.printf("[knob] volume girdi -> VOL %d", v)
+  elseif M.knobMode == "spaces" then
+    local n, idx = spacesInfo()
+    if n then lastN, lastIdx = n, idx; sendLine(string.format("SP %d %d", n, idx))
+      hs.printf("[knob] spaces girdi -> SP %d %d", n, idx) end
+  elseif M.knobMode == "tabs" then
+    local n, idx = tabsInfo()
+    if n then lastN, lastIdx = n, idx; sendLine(string.format("TAB %d %d", n, idx))
+      hs.printf("[knob] tabs girdi -> TAB %d %d", n, idx) end
+  elseif M.knobMode == "brightness" then
+    local v = brLevel(); if v then lastV = v; sendLine("BR " .. v) end   -- okunamazsa LED optimistik kalir
+  end
+end
+
+local function setKnobMode(m)   -- mod degisti (buton VEYA hotkey) -> takip et + durumu yolla
+  if m ~= "volume" and m ~= "spaces" and m ~= "tabs" and m ~= "brightness" then return end
+  M.knobMode = m
+  hs.timer.doAfter(0.15, pushState)   -- knob yeni geometriye otursun, sonra sync
+end
+
+-- ---------- knob butonu mod bildirimi: F16=volume, F17=spaces, F18=tabs (HID, serial okuma YOK) ----------
+hs.hotkey.bind({}, "f16", function() setKnobMode("volume") end)
+hs.hotkey.bind({}, "f17", function() setKnobMode("spaces") end)
+-- Chrome'u one al + gercek sekme sayisini alana kadar tekrar dene (8'de takilmasin)
+local function enterTabs()
+  hs.application.launchOrFocus("Google Chrome")
+  M.knobMode = "tabs"
+  local tries = 0
+  local function try()
+    tries = tries + 1
+    local n, idx = tabsInfo()             -- Chrome frontmost ise gercek sayi doner
+    if n then lastN, lastIdx = n, idx; sendLine(string.format("TAB %d %d", n, idx))
+      hs.printf("[knob] tabs -> TAB %d %d", n, idx)
+    elseif tries < 8 then hs.timer.doAfter(0.25, try) end   -- Chrome one gelene kadar dene
+  end
+  hs.timer.doAfter(0.3, try)
+end
+hs.hotkey.bind({}, "f18", enterTabs)   -- Chrome tusu (knob P1)
+-- Knob tabs modunda cevirince F19(next)/F20(prev) -> Chrome sekmesini AppleScript ile degistir (odak gerekmez)
+hs.hotkey.bind({}, "f19", function() chromeTab(1) end)
+hs.hotkey.bind({}, "f20", function() chromeTab(-1) end)
+
+-- ---------- PARLAKLIK modu (knob butonu -> F14; cevirince HYPER +/-) ----------
+hs.hotkey.bind({}, "f14", function() setKnobMode("brightness") end)
+local HYPER = {"cmd", "alt", "ctrl", "shift"}
+hs.hotkey.bind(HYPER, "u", function() brKey(true)  end)   -- knob sag -> parlaklik + (sistem tusu)
+hs.hotkey.bind(HYPER, "n", function() brKey(false) end)   -- knob sol -> parlaklik - (sistem tusu)
+
+-- ---------- UYGULAMA AC/ODAKLA (knob butonu -> HYPER harf) ----------
+-- Deploy butonu -> Sevincli ERP'yi SUNUCU DURUMU sayfasinda ac.
+-- MEVCUT erp penceresini (PWA dahil) bulup YONLENDIR (yeni pencere/anasayfa sorunu cozulur); yoksa ac.
+-- PWA link-capturing acikken bu, URL'i PWA penceresinde acar/yonlendirir.
+-- Sunucu bilgileri AYRI dosyada (git'e girmesin): ~/.hammerspoon/knob_secrets.lua
+-- Sablon icin: <repo>/docs/hammerspoon-init.lua.example
+local SECRETS = {}
+do
+  local ok, t = pcall(dofile, os.getenv("HOME") .. "/.hammerspoon/knob_secrets.lua")
+  if ok and type(t) == "table" then SECRETS = t
+  else hs.printf("[knob] UYARI: knob_secrets.lua okunamadi — deploy calismaz") end
+end
+local ERP_URL = SECRETS.ERP_URL or ""
+hs.hotkey.bind(HYPER, "d", function()
+  hs.execute('open "' .. ERP_URL .. '"')
+end)
+hs.hotkey.bind(HYPER, "j", function() hs.application.launchOrFocus("Claude") end)
+hs.hotkey.bind(HYPER, "g", function() hs.application.launchOrFocus("Autodesk Fusion") end)
+hs.hotkey.bind(HYPER, "l", function() hs.application.launchOrFocus("ELEGOO Slicer") end)
+
+-- ---------- DEPLOY (knob deploy butonu -> kasa sifresi + kol -> F13) ----------
+-- GERCEK DEPLOY (dry-run KAPALI): sunucuda tam deploy calisir (pull+build+restart/prod).
+-- Tetik: knob'da sifre (3-5-7-1) + kol -> F13 -> runDeploy. Geri dry-run icin: true yap.
+M.deployDryRun  = false
+M.deployRunning = false
+
+local DEPLOY_HOST = SECRETS.DEPLOY_HOST or ""
+local DEPLOY_KEY  = os.getenv("HOME") .. "/.ssh/knob_deploy_ed25519"
+
+local function knobStatus(txt) sendLine("DST " .. txt) end   -- knob ekranina asama yaz
+
+local function runDeploy()
+  if M.deployRunning then knobStatus("CALISIYOR"); return end
+  M.deployRunning = true
+  knobStatus(M.deployDryRun and "DRY-RUN" or "BASLIYOR")
+  hs.alert.show(M.deployDryRun and "Deploy: DRY-RUN" or "Deploy: PROD", 1.0)
+
+  local args = { "-i", DEPLOY_KEY, "-o", "IdentitiesOnly=yes",
+                 "-o", "StrictHostKeyChecking=accept-new", DEPLOY_HOST }
+  if M.deployDryRun then table.insert(args, "--"); table.insert(args, "--dry-run") end
+
+  M.deployTask = hs.task.new("/usr/bin/ssh",
+    function(code)                                   -- bitis
+      M.deployRunning = false
+      knobStatus(code == 0 and "TAMAM" or ("EXIT " .. tostring(code)))
+      hs.printf("[knob] deploy bitti, kod=%s", tostring(code))
+    end,
+    function(_, out)                                 -- canli akis: STAGE: satirlari
+      if out then
+        for line in out:gmatch("[^\r\n]+") do
+          local st = line:match("^STAGE:(.+)$")
+          if st then knobStatus(st); hs.printf("[knob] STAGE %s", st) end
+        end
+      end
+      return true
+    end, args)
+  M.deployTask:start()
+end
+
+M.runDeploy = runDeploy
+hs.hotkey.bind({}, "f13", runDeploy)                 -- knob kol onayindan sonra gelir
+
+-- ---------- watcher'lar: durum degisince (mod uyumluysa) yolla ----------
+-- MOD KILIDI KALDIRILDI (01.09): eskiden her fonksiyon "bu modda degilsek cik" ile
+-- basliyordu, yani knob sadece aktif modun verisini aliyordu. Moda gecince once eski
+-- tahmin gorunup sonra duzeliyordu. Artik hepsi surekli gonderiliyor; knob RAM'inde
+-- sakliyor ve mod degisince HAZIR veriyi gosteriyor (firmware: stVol/stBr/stSp*/stTab*).
+-- Her tur icin AYRI son-deger takibi (tek 'lastV' paylasilinca yanlis atlama oluyordu).
+local lastVol, lastBr, lastSpN, lastSpI = -1, -1, -1, -1
+local function onVol()
+  local v = volLevel()
+  if v ~= lastVol then lastVol = v; sendLine("VOL " .. v); hs.printf("[knob] ses -> VOL %d", v) end
+end
+
+M.dev = hs.audiodevice.defaultOutputDevice()
+if M.dev then M.dev:watcherCallback(function() onVol() end); M.dev:watcherStart() end
+hs.audiodevice.watcher.setCallback(function()
+  M.dev = hs.audiodevice.defaultOutputDevice()
+  if M.dev then M.dev:watcherCallback(function() onVol() end); M.dev:watcherStart() end
+  onVol()
+end)
+hs.audiodevice.watcher.start()
+
+local function onSpace()
+  local n, idx = spacesInfo()
+  if not n then return end
+  if n ~= lastSpN or idx ~= lastSpI then lastSpN, lastSpI = n, idx
+    sendLine(string.format("SP %d %d", n, idx)); hs.printf("[knob] spaces -> SP %d %d", n, idx) end
+end
+pcall(function() M.sw = hs.spaces.watcher.new(function() onSpace() end); M.sw:start() end)
+
+local function onTabs()
+  if M.knobMode ~= "tabs" then return end
+  local n, idx = tabsInfo()
+  if not n then return end
+  if n ~= lastN or idx ~= lastIdx then lastN, lastIdx = n, idx
+    sendLine(string.format("TAB %d %d", n, idx)); hs.printf("[knob] tabs -> TAB %d %d", n, idx) end
+end
+
+local function onBright()   -- LED'i gercek parlakliga tazele (okunabiliyorsa)
+  local v = brLevel()
+  if v and v ~= lastBr then lastBr = v; sendLine("BR " .. v); hs.printf("[knob] parlaklik -> BR %d", v) end
+end
+
+-- yedek: 0.7sn'de bir aktif modu tazele (durum degisimi / kacan event)
+-- OLAY TABANLI (01.09). Her veri icin macOS olayi YOK — olan yerde olay, olmayan yerde
+-- mumkun olan en ucuz yoklama:
+--   ses        -> hs.audiodevice.watcher       (OLAY, yukarida kurulu)
+--   space      -> hs.spaces.watcher            (OLAY, asagida kurulu)
+--   fare ekran -> olay YOK. hs.mouse.getCurrentScreen() saf hesap (surec calistirmaz),
+--                 0.5 sn'de bir bakmak bedava sayilir; sadece EKRAN DEGISINCE onSpace().
+--   parlaklik  -> olay YOK (Control Center / klavye / ortam isigi hicbir bildirim uretmiyor).
+--                 Parlaklik tusuna basinca ANINDA okunur; ayrica 2 sn'lik yedek yoklama
+--                 (ioreg cagrisi 40 ms -> %2 mesgul).
+--   tabs       -> Chrome'a AppleScript, PAHALI -> sadece o moddayken.
+M.onBrightNow = onBright   -- brKey icinden aninda tazeleme icin
+M.lastScreenU = nil
+-- Fare ekran degisimi: macOS'ta dogrudan "ekran degisti" olayi yok, AMA mouseMoved bir
+-- olay akisi olarak alinabiliyor. Sorun sikligi (hareket ederken saniyede yuzlerce).
+-- SECIM GEREKCESI: bu CPU kazanci DEGIL, GECIKME kazanci. Eventtap kurunca macOS her
+-- fare olayini HS uzerinden gecirir; fare hareket ederken yoklamadan PAHALI olur.
+-- Ama fare duruyorken maliyet SIFIR (yoklama saniyede 2 kez calisiyordu) ve ekran
+-- degisimi ANINDA yakalaniyor (yoklamada 0.5 sn'ye kadar gecikme vardi).
+-- Cozum: olayi dinle, icinde neredeyse hicbir sey yapma — son bakistan 100 ms gecmediyse
+-- hemen don. Boylece fare DURURKEN hicbir maliyet yok ve ekran degisimi ANINDA yakalaniyor.
+local lastCheck = 0
+local function checkScreen()
+  local scr = hs.mouse.getCurrentScreen()
+  local u = scr and scr:getUUID()
+  if u ~= M.lastScreenU then M.lastScreenU = u; onSpace() end
+end
+M.mouseTap = hs.eventtap.new({hs.eventtap.event.types.mouseMoved}, function()
+  local now = hs.timer.secondsSinceEpoch()
+  if now - lastCheck >= 0.1 then lastCheck = now; checkScreen() end
+  return false                      -- olayi TUKETME, sadece dinle
+end)
+M.mouseTap:start()
+-- yedek: eventtap durursa (izin kaybi vb.) 3 sn'de bir yine de bak
+M.screenPoll = hs.timer.doEvery(3.0, checkScreen)
+M.brPoll = hs.timer.doEvery(2.0, function()
+  onBright()
+  if M.knobMode == "tabs" then onTabs() end
+end)
+
+-- ---------- hotkey: HS'den mod degistir (butonsuz da calissin) ----------
+M.setKnobMode = setKnobMode
+_G.SmartKnob = M
+hs.hotkey.bind({"cmd", "alt", "ctrl"}, "K", function()
+  local m = (M.knobMode == "volume") and "spaces" or "volume"
+  sendLine("MODE " .. m)      -- firmware'i de cevir
+  setKnobMode(m)              -- takip + durum yolla
+  hs.alert.show("SmartKnob: " .. m, 0.7)
+end)
+-- Cmd+Alt+Ctrl+C = Chrome/sekme modu (buton P1 olmadan test icin)
+hs.hotkey.bind({"cmd", "alt", "ctrl"}, "C", function()
+  sendLine("MODE tabs"); enterTabs(); hs.alert.show("SmartKnob: tabs", 0.7)
+end)
+
+-- ---------- baslat ----------
+-- HS her reload'da knobMode'u "volume" varsayiyordu ve knob'a soramiyordu (seri OKUMUYORUZ,
+-- mod sadece HID F-tuslarindan ogreniliyor). Knob baska moddaysa senkron KOPUYOR ve 0.7sn'lik
+-- yoklama yanlis modu tazeliyordu -> knob ekraninda bayat space/parlaklik bilgisi (01.09).
+-- Cozum: knob'a "modunu tekrar duyur" de. Firmware SYNC komutunu alinca ilgili F-tusunu basar,
+-- asagidaki hotkey yakalar ve knobMode duzelir.
+hs.timer.doAfter(0.6, function() sendLine("SYNC") end)
+-- ve periyodik: HS ya da knob tek basina yeniden baslarsa senkron kendi kendine duzelsin.
+M.syncTimer = hs.timer.doEvery(10, function() sendLine("SYNC") end)
+hs.timer.doAfter(1.2, pushState)   -- aciliste bir kez sync (mevcut mod)
+hs.alert.show("SmartKnob HS (mode-entry sync) ✓", 1.2)
+hs.printf("[knob] yuklendi. port=%s hs.spaces=%s", knobPort(), tostring(hs.spaces ~= nil))
+return M
