@@ -202,7 +202,12 @@ static int16_t  bTrq[BURST_N];   // tork, 0.001 V birim
 static volatile int bIdx = -1;   // -1 = kapali, -2 = TETIK BEKLIYOR
 static float bTrigV = 8.0f;      // tetik hizi (rad/s)
 static uint32_t bT0 = 0, bT1 = 0;   // bT1 = SON ornegin zamani (dolum bitisi)
-float fwdThrK = 0.85f;   // adim/HID tetikleme esigi (x centik araligi). 'F <k>' ile ayarlanir.
+float fwdThrK = 0.85f;   // adim/HID tetikleme esigi — TUM MODLAR icin (esik = fwdThrK x aralik).
+                         // 0.6 -> 0.85: "gecis tik bitmeden oluyor" sikayeti icin (31.08).
+                         // 02.09'da bunu suclayip 0.70'e cektim — YANLISTI: 0.85 dun ogleden
+                         // sonra saatlerce sorunsuz calisti. Ariza aralikli ve 12V'un kesilip
+                         // geri verilmesiyle (ESP calisirken) baslıyor; reset ile duzeliyor.
+                         // Sebep HENUZ BULUNMADI, esikle ilgisi yok.
 int   knobDir = -1;      // kullaniciya donuk cevirme yonu (+1/-1). 'N' ile ters cevrilir.
                          // 31.08: sensor yeniden monte edilince yon tersine dondu.
 float centerHyst  = 0.0f;    // haptik merkez histerezisi (x centik araligi).
@@ -858,9 +863,13 @@ static void handleLine(String s) {
     delay(500);
     Serial.printf("FOC dongu = %lu Hz\n", (unsigned long)((focIters - n0) * 1000UL / (millis() - t0)));
   }
-  else if (c=='?') Serial.printf("GATE pending=%d hidRel=%lu forcing=%d nextIn=%ld modeYasi=%lu appMode=%d\n",
+  else if (c=='?') Serial.printf("GATE pending=%d hidRel=%lu forcing=%d nextIn=%ld modeYasi=%lu appMode=%d "
+                                  "| SAYIM: mode=%d dep=%d centering=%d relAnchor=%.1f d=%.1f esik=%.1f\n",
                                   pendingHid, (unsigned long)hidReleaseAt, (int)forcing,
-                                  (long)(nextStepAt - millis()), (unsigned long)(millis() - modeSwitchAt), (int)appMode),
+                                  (long)(nextStepAt - millis()), (unsigned long)(millis() - modeSwitchAt), (int)appMode,
+                                  (int)mode, (int)depState, (int)centering,
+                                  relAnchor*57.3f, (motor.shaft_angle - relAnchor)*57.3f,
+                                  detentSpacing()*fwdThrK*57.3f),
                     Serial.printf("STATUS aci=%.3f rad (%.1f deg) mode=%s vlim=%.2f detents=%d\n",
                                  motor.shaft_angle, motor.shaft_angle*180.0f/PI, modeName(), motor.voltage_limit, detents);
   else Serial.printf("bilinmeyen: %s\n", s.c_str());
