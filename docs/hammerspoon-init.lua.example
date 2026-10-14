@@ -338,9 +338,27 @@ M.screenPoll = hs.timer.doEvery(3.0, checkScreen)
 -- 7 gunde 824 MB. Bu yigin boyutunda dakikada bir tam toplama olculemeyecek kadar ucuz.
 M.gcTimer = hs.timer.doEvery(60, function() collectgarbage("collect") end)
 
+-- PARLAKLIK ARTIK OLAY TABANLI (14.10).
+-- Eskiden onBright() 2 sn'de bir KOSULSUZ caliyordu -> gunde 43.200 ioreg sureci,
+-- hicbir sey degismese bile. Sizintinin baskin kaynagi buydu. Olay kaynaklari:
+--   1) knob cevirince        -> brKey() zaten 0.12 sn sonra okuyor
+--   2) klavye parlaklik tusu -> asagidaki systemDefined eventtap (OLCULDU: yakaliyor)
+--   3) moda girince          -> pushState() zaten taze okuyor
+--   4) Control Center / ortam isigi -> olay YOK. Bunun icin asagidaki yoklama,
+--      ama SADECE parlaklik modundayken. Diger modlarda hic ioreg calismiyor.
+-- systemDefined olaylari seyrek (mouseMoved gibi degil), eventtap maliyeti yok sayilir.
+M.brTap = hs.eventtap.new({hs.eventtap.event.types.systemDefined}, function(e)
+  local d = e:systemKey()
+  if d and d.down and (d.key == "BRIGHTNESS_UP" or d.key == "BRIGHTNESS_DOWN") then
+    hs.timer.doAfter(0.15, onBright)        -- once macOS uygulasin, sonra oku
+  end
+  return false                              -- olayi TUKETME, sadece dinle
+end)
+M.brTap:start()
+
 M.brPoll = hs.timer.doEvery(2.0, function()
-  onBright()
-  if M.knobMode == "tabs" then onTabs() end
+  if M.knobMode == "brightness" then onBright() end
+  if M.knobMode == "tabs"       then onTabs()   end
 end)
 
 -- ---------- hotkey: HS'den mod degistir (butonsuz da calissin) ----------
