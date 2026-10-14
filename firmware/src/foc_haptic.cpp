@@ -80,6 +80,7 @@ float volSpacing = 0.220f; // 12.6 deg — 25 centik. ARALIK = GUC (tepe kuvvet 
 // SABIT hedefe (orta) gider, DEGERE degil -> kovalanan hareketli hedef yok, forcing gibi savasamaz.
 static bool     centering = false;
 static uint32_t centerStart = 0;
+static float    centerTarget = 0;  // ortalamanin hedefi: bar modlarinda SEVIYENIN acisi, digerlerinde orta
 static float    Kcenter = 6.0f;   // ortalama yayi (NAZIK -> kullanici kolayca override eder)
 
 // ================= DEPLOY KASA KILIDI =================
@@ -186,8 +187,16 @@ float damping = 0.05f;   // COK KUCUK. Eski degerlerin (0.15-0.30) ucte biri.
                          // SimpleFOC'un resmi haptik ornegi de D=0 kullaniyor.
                          // ESKI DEGER 0.15/0.30 idi; sonum ekleme durtusune direnelim.   // hiz sonumleme — DUSUK TUT. Olculdu: 0.15->2 cirpinti, 0.35->14, 0.55->47.
                          // Hiz tahmini gecikmeli oldugu icin yuksek sonum titremeyi SONDURMEZ, BESLER.
-float minA = 0, maxA = 1.0f;   // FIZIKSEL duvar acilari (homing ile bulunur)
-bool  homed = false;           // homing yapildi mi? Bootta YAPILMIYOR: duvara dayanmak stall = guc
+// FIZIKSEL duvar acilari — 14.10 OLCULDU ('H' homing): min=6.7 max=326.3 aralik=319.6 deg.
+// MT6701 mutlak sensor oldugu icin bu sayilar her resette AYNI kalir, bir kez olculmesi yeterli.
+// GECERSIZ OLUR: braket/sensor/miknatis sokulurse. O zaman zero_electric_angle ile BIRLIKTE
+// yenilenir ('P 7' kalibrasyon, 'H' homing) — ikisi ayni mekanik hizalamaya bagli.
+// NOT (kontrol edildi): kullanilabilir alan 6.7 -> 326.3 duz cikiyor, 0/360 donum noktasi
+// olu bolgenin ICINDE kaliyor. Yani minA<a<maxA kiyaslamasi sorunsuz. Braket farkli aciyla
+// takilirsa bu bozulabilir; o zaman duvarlarin sarmalayip sarmalamadigina tekrar bak.
+float minA = 6.7f   * PI / 180.0f;
+float maxA = 326.3f * PI / 180.0f;
+bool  homed = true;            // duvarlar yukarida SABIT. Bootta homing YAPILMIYOR: stall = guc
                                // kaynagi CC'ye giriyor + motor isiniyor. Gunluk kullanim (ses/space/
                                // scroll) goreli grid kullandigi icin duvarlari BILMEK ZORUNDA DEGIL.
                                // Sadece deploy modu duvarlara ihtiyac duyar -> ilk girişte yapilir.
@@ -241,16 +250,29 @@ float wallMargin = 0.14f;// duvar ihtiyat payi (rad ~8°): centikler bu payin IC
 
 // seviye <-> aci + LED yardimcilari
 static float midA() { return 0.5f * (minA + maxA); }
-// SPACES: sabit aralikli centikler fiziksel aralik ORTASINA yerlesir (komple cevirmeye gerek yok).
-// VOLUME: centikler tum kullanilabilir araliga yayilir.
-// KURAL: VOLUME tum araliga yayilir; DIGER TUM modlar (spaces/tabs/...) ORTADA toplu, sabit aralikli
+// KURAL: BAR modlari (ses/parlaklik) SOL DUVARDAN baslar -- sayilari sabit (17), uctan uca
+// eslesme anlamli: sonuna kadar sola cevir = en kisik. DIGER modlar (spaces/tabs) ORTADA toplu,
+// cunku sayilari degisken (2/4/8) ve degisken sayiyi 320 dereceye yaymak sacma olurdu.
+// NOT: ses "tum araliga yayilir" DEGIL -- aralik sabit 12.6 deg, 17 centik 201.6 deg tutuyor,
+// kullanilabilir 319.6 deg'in sagi bos kaliyor. Aralik = his demek oldugu icin degistirilmedi.
+// 14.10 DUZELTME -- bu fonksiyonlarin ETKISI SINIRLI, yaniltici olmasin:
+// levelAngle() HIC CAGRILMIYOR (olu kod). firstAngle() sadece detentIndex() icinden,
+// o da tek yerde: bootta baslangic 'level' degerini secmek icin. Yani centiklerin
+// FIZIKSEL yerini belirlemiyorlar. Gercek yerlesim M_DETENT torkunda ve GORELI:
+// hapCenter, mod degisiminde knob neredeyse oraya oturan relAnchor'dan tureliyor.
+// Mutlak konumlandirma (knob'un seviyeye fiziksel gitmesi) 27.07'de f039840 ile
+// KASTEN kaldirildi: o zaman duvarlar bilinmiyordu ve hedef duvarin otesinde kalabiliyordu.
+// Bugun duvarlar olculu ve sabit, yani istenirse bar modlari icin geri getirilebilir.
 static float detentSpacing() {
   if (appMode == APP_SCROLL) return 0.055f;   // INCE -> responsive scroll (her ~3° 1 tekerlek tiki)
   return (appMode == APP_VOLUME || appMode == APP_BRIGHTNESS) ? volSpacing : spaceSpacing;
 }
 static float firstAngle() {   // ilk centigin (index 0) acisi
-  if (appMode != APP_VOLUME) return midA() - 0.5f * (detents - 1) * spaceSpacing;  // ortala
-  return minA + wallMargin;
+  // bar modlari (ses/parlaklik) sol duvardan; digerleri aralik ortasina toplu.
+  // (barMode() asagida tanimli oldugu icin kosul burada acik yazildi)
+  if (appMode != APP_VOLUME && appMode != APP_BRIGHTNESS)
+    return midA() - 0.5f * (detents - 1) * spaceSpacing;   // ortala
+  return minA + wallMargin;                                 // sol duvardan basla
 }
 static float levelAngle(int lv) { return firstAngle() + lv * detentSpacing(); }
 static int   detentIndex(float a) {
@@ -259,18 +281,29 @@ static int   detentIndex(float a) {
   return constrain(i, 0, detents - 1);
 }
 static bool barMode() { return appMode == APP_VOLUME || appMode == APP_BRIGHTNESS; }  // dolan-bar modlari (ses/parlaklik)
-// LED0 ARIZALI (31.08): ilk WS2812'nin ISIK kati olu, ama VERI aktarma kati saglam
-// (arkasindaki 15 LED normal yaniyor). Bu yuzden fiziksel index 0 KULLANILMIYOR;
-// gosterge 1..NLED-1 arasina yayiliyor. Cip degistirilirse LED_OFF'u 0 yap.
-#define LED_OFF   1                 // ilk kullanilabilir fiziksel index
+// ILK IKI LED ARIZALI. Ikisi de AYNI ariza: ISIK kati olu, VERI kati saglam (arkadakiler yaniyor).
+//   index 0: 31.08'de oldu.
+//   index 1: 14.10'da 'L' testiyle bulundu -- 16 indekse zorla beyaz yazildi, bu yanmadi.
+//            Muhtemelen daha once oldu ama barin ilk dilimi oldugu ve ses hep 0 oldugu icin
+//            fark edilmedi. (Hafizada "cip sokulup kopruledi" yaziyordu -- YANLISTI, iki cip
+//            de zincirde duruyor.)
+// Gosterge 2..NLED-1 arasina yayiliyor (14 LED). Cipler degistirilirse LED_OFF'u 0 yap.
+#define LED_OFF   2                 // ilk kullanilabilir fiziksel index
 #define NLED_USE  (NLED - LED_OFF)  // kullanilabilir LED sayisi (15)
 static inline CRGB& L(int i) { return leds[LED_OFF + ((i % NLED_USE) + NLED_USE) % NLED_USE]; }
 
 static void updateLED(int lv) {
   CRGB base = colBase[appMode], act = colActive[appMode];
-  leds[0] = CRGB::Black;   // arizali LED: her zaman kapali
+  for (int i = 0; i < LED_OFF; i++) leds[i] = CRGB::Black;   // arizali LED'ler: her zaman kapali
   if (barMode()) {                             // dolan bar: seviyeye kadar aktif renk
-    for (int i = 0; i < NLED_USE; i++) L(i) = (i < lv) ? act : base;
+    // 14.10 OLCEKLI: 17 kademe (0..16) -> NLED_USE LED (14). Eskiden lv LED yakiyordu,
+    // LED sayisi kademeden az oldugu icin ust kademeler ayni dolu bari gosteriyordu.
+    // Kesirli kisim son LED'in parlakligiyla -> her kademe gozle ayirt edilir.
+    float f = (detents > 1) ? (float)lv * NLED_USE / (detents - 1) : 0.0f;
+    int   full = (int)f;
+    uint8_t frac = (uint8_t)((f - full) * 255.0f);
+    for (int i = 0; i < NLED_USE; i++)
+      L(i) = (i < full) ? act : (i == full && frac) ? blend(base, act, frac) : base;
   } else if (appMode == APP_SCROLL) {          // SCROLL: donen tek nokta (gorsel geri bildirim)
     for (int i = 0; i < NLED_USE; i++) L(i) = base;
     L(lv) = act;
@@ -331,17 +364,41 @@ static void applyMode(AppMode m) {
     detents = 17;
     if (stVol >= 0) level = constrain(stVol, 0, detents - 1);
   }
-  Kdet = 22.0f;
+  // Kdet MODA GORE (14.10'da geri getirildi).
+  // Tarihce: 27.07'de boyleydi (space/tabs 30, ses 22). 27.08'de "gucu ARALIK verir,
+  // kararsizligi SERTLIK verir" bulgusuyla hepsi 22'ye birlestirildi. Ama bu, space'in
+  // tepe kuvvetini de dusurdu ve o sirada fark edilmedi -- odak sesteydi.
+  // 14.10 A/B (mod degistirmeden, sadece 'k' ile): space'te 30 belirgin daha guclu,
+  // titreme/salinim yok. Ses 22'de kaliyor: oradaki ayar olcumle oturdu (44 kararsizdi),
+  // 30 ses modunda DENENMEDI.
+  //   tepe kuvvet = Kdet * aralik / 2
+  //   space/tabs : 30 * 0.26  / 2 = 3.90 V   (aralik genis, sinir egimi daha seyrek)
+  //   ses/parlak : 22 * 0.220 / 2 = 2.42 V
+  Kdet = (m == APP_SPACES || m == APP_TABS) ? 30.0f : 22.0f;
   forcing = false;
   relAnchor = motor.shaft_angle;                 // goreli referans (ortalama bitince guncellenir)
-  updateLED(appMode == APP_VOLUME ? level : dispIdx);
+  updateLED(barMode() ? level : dispIdx);   // 14.10: parlaklik da bar -> level (eskiden dispIdx aliyordu)
   pendingHid = 0;
   modeSwitchAt = millis();   // geçiş sonrası kisa guard (sahte navigasyon yok)
-  // ORTALAMA sadece DUVARA YAKINSA (orta bolgedeysen gereksiz -> gecikme olmasin, aninda tepki).
-  float half = (maxA - minA) * 0.5f;
-  centering = (half > 0.15f) && (fabsf(motor.shaft_angle - midA()) > half * 0.55f);
+  // MOD GIRISINDE KONUMLANDIRMA (14.10).
+  // BAR modlari (ses/parlaklik): knob SEVIYENIN mutlak acisina gider. Ses 0 -> sol duvar,
+  //   ses 16 -> sol duvar + 16 centik. 27.07'de (f039840) bu kaldirilmisti cunku duvarlar
+  //   bilinmiyordu ve hedef duvarin otesine dusebiliyordu. Artik minA/maxA olculu ve sabit.
+  //   ONEMLI -- 'forcing' gibi DEGIL: sadece moda girerken BIR KEZ gider, varinca serbest.
+  //   HS'ten sonra gelen VOL/BR motoru SURMEZ, sadece LED boyar. Kullanici ters iterse
+  //   aninda iptal (asagida pushingAway). forcing iki kez "kavga ediyor" diye iptal
+  //   edilmisti; fark, surekli kovalamamasi.
+  // DIGER modlar (space/tabs): eskisi gibi -- sadece duvara yakinsa ortaya al.
+  if (barMode()) {
+    centerTarget = levelAngle(level);
+    centering = fabsf(motor.shaft_angle - centerTarget) > 0.05f;
+  } else {
+    centerTarget = midA();
+    float half = (maxA - minA) * 0.5f;
+    centering = (half > 0.15f) && (fabsf(motor.shaft_angle - centerTarget) > half * 0.55f);
+  }
   centerStart = millis();
-  Serial.printf("MOD %d -> ortalama=%d\n", (int)m, centering ? 1 : 0);
+  Serial.printf("MOD %d -> ortalama=%d hedef=%.1f\n", (int)m, centering ? 1 : 0, centerTarget*180.0f/PI);
 }
 
 // ---- DEPLOY: yardimcilar ----
@@ -1039,15 +1096,23 @@ static void focStep() {
     } else if (fabsf(shaftVel()) > 40.0f) {   // VELOCITY CUTOFF (SmartKnob): runaway yok
       t = 0;
     } else if (centering) {
-      // MOD GECISI ORTALAMA: sabit hedef=fiziksel orta. NAZIK yay + GUCLU SONUM (overshoot/titreme YOK).
-      float e = motor.shaft_angle - midA();
+      // MOD GECISI KONUMLANDIRMA: hedef = centerTarget (bar: seviyenin acisi, diger: orta).
+      // Bar modunda hedef yolda CANLI: HS'in VOL/BR'si ortalama surerken gelirse yeni seviyeye
+      // yonelir. Varinca kapanir, sonrasinda HS motoru surmez.
+      if (barMode()) centerTarget = levelAngle(level);
+      float e = motor.shaft_angle - centerTarget;
       t = -Kcenter * e;
       t -= 0.35f * shaftVel();   // DUSUK sonum: gurultu buyutup titretmez (yuksek sonum titreme enjekte eder)
       bool reached     = fabsf(e) < 0.05f && fabsf(shaftVel()) < 0.5f;   // ortaya oturdu
       bool pushingAway = (e * shaftVel()) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
-      if (reached || pushingAway || millis() - centerStart > 700) {
+      // Zaman asimi: bar modunda yol 311 deg'e kadar cikabiliyor (326 -> 14.7). Hiz 2.5V/0.35
+      // sonumle ~7 rad/s'de doyuyor -> ~0.8 sn. Eski 700 ms yarida keserdi.
+      uint32_t tmo = barMode() ? 1500 : 700;
+      if (reached || pushingAway || millis() - centerStart > tmo) {
         centering = false;
-        relAnchor = motor.shaft_angle;   // goreli grid'i knob'un su anki yerinden baslat
+        // Vardiysa grid'i MUTLAK hedefe hizala (sonraki adimlar seviyeyle ayni yerde kalsin).
+        // Kullanici dokunduysa/zaman asimiysa bulundugu yerden goreli devam -- hedefe cekme = kavga.
+        relAnchor = reached ? centerTarget : motor.shaft_angle;
         Serial.printf("ORTALAMA bitti (%s) aci=%.1f\n",
           reached ? "oturdu" : pushingAway ? "kullanici-dokundu" : "timeout", motor.shaft_angle*180.0f/PI);
       }
@@ -1157,11 +1222,13 @@ void setup() {
   Serial.printf("initFOC bitti. zero_offset=%.3f dir=%d  (sabit kod icin not al)\n",
                 motor.zero_electric_angle, motor.sensor_direction);
 
-  // Bootta homing YOK (stall = CC + isinma). Nominal aralik: olculen ~318 derece, mevcut konum ortada varsayilir.
-  // Gercek duvarlar ilk deploy girisinde (veya 'H' komutuyla) bulunur.
-  { float a0 = motor.shaft_angle, half = 159.0f * PI / 180.0f;
-    minA = a0 - half; maxA = a0 + half;
-    Serial.println("Homing ATLANDI (bootta stall yok). Deploy'a girince veya 'H' ile yapilir."); }
+  // Bootta homing YOK (stall = CC + isinma). Duvarlar artik SABIT KODLU (bkz. minA/maxA).
+  // ESKIDEN burasi minA/maxA'yi "mevcut konum ortadadir" varsayarak a0 +-159 yapiyordu. HATAYDI:
+  // ESP dock takilinca resetleniyor, knob o an neredeyse ORASI merkez sayiliyordu ve bir sonraki
+  // mod degisiminde 'ortalama' knob'u oraya suruyordu -> "knob hangi taraftaysa o tarafa dayiyor".
+  // Artik ezmiyoruz. 'H' ile elle yeniden olculebilir.
+  Serial.printf("Duvarlar SABIT: min=%.1f max=%.1f aralik=%.1f deg ('H' ile yeniden olc)\n",
+                minA*180.0f/PI, maxA*180.0f/PI, (maxA-minA)*180.0f/PI);
 
   // PCF8574 buton genisletici (I2C1 AYRI bus, AS5600'u yavaslatmaz)
   Wire1.begin(PIN_I2C1_SDA, PIN_I2C1_SCL, 100000);
