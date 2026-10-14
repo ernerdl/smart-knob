@@ -161,6 +161,14 @@ end
 
 local function setKnobMode(m)   -- mod degisti (buton VEYA hotkey) -> takip et + durumu yolla
   if m ~= "volume" and m ~= "spaces" and m ~= "tabs" and m ~= "brightness" then return end
+  -- 14.10: knob her 10 sn'lik SYNC'e modunun F-tusuyla cevap veriyor, yani burasi mod
+  -- DEGISMESE de 10 sn'de bir cagriliyordu ve pushState kosulsuz calisiyordu. Ses/space'te
+  -- maliyeti sifir (HS API'leri) ama parlaklik modunda ioreg, tabs modunda Chrome'a
+  -- AppleScript bosuna tekrar calisiyordu. Artik sadece GERCEK mod degisiminde push var.
+  -- BEDELI: knob yeniden baslar ve HS'in bildigi modla AYNI moda acilirsa RAM'i bos kalir;
+  -- ilk gercek olaya (ses/space/parlaklik degisimi) kadar ekraninda bayat deger durur.
+  -- HS yeniden baslarsa sorun yok: acilista 1.2 sn'de bir kez pushState zaten calisiyor.
+  if m == M.knobMode then return end
   M.knobMode = m
   hs.timer.doAfter(0.15, pushState)   -- knob yeni geometriye otursun, sonra sync
 end
