@@ -77,7 +77,18 @@ Tek ölçüme güvenmeyin: ilk deneme 4.839/CCW verdi, sonraki üç tutarlı öl
 
 ### Kötü sürücü bazı sorunları gizler
 
-L298N ile de çalışıyordu — ve kısmen **kötü olduğu için**. Kayıpları ve yavaşlığı, kontrol döngüsündeki gürültüyü ve aşırı kazancı yumuşatıyordu. L6234 temiz olduğu için ne komut edersek onu birebir basıyor, gürültü dahil. Sürücü sorunu yaratmadı, gizlenen sorunu görünür yaptı.
+L298N ile de çalışıyordu — ve kısmen **kötü olduğu için**. L6234 temiz olduğu için ne komut edersek onu birebir basıyor, gürültü dahil. Sürücü sorunu yaratmadı, gizlenen sorunu görünür yaptı.
+
+**Düzeltme (14.10):** mekanizmayı önce "kayıpları sönüm sağlıyordu" diye açıklamıştık. Yanlış. Voltaj modunda motorun kendi elektriksel sönümü `b_el = Kt·Ke/R` — yani **dirençle ters orantılı**. L298N'in Darlington düşümü toplam direnci artırdığı için sönümü *azaltıyordu*:
+
+| sürücü | ek düşüm/direnç | b_el |
+|---|---|---|
+| L298N (~1.8 V @1A, düşük akımda daha kötü) | ~1.8–5.3 Ω eşdeğer | 1.9–3.4 ×10⁻⁴ |
+| L6234PD (0.3 Ω/anahtar) | 0.6 Ω | **4.6 ×10⁻⁴** |
+
+L6234 aslında 1.5–2.5 kat **daha fazla** sönüm veriyor. Gerçek mekanizma muhtemelen **ölü bölge**: L298N'in sabit ~1.8 V düşümü, `voltage_limit = 5 V` ölçeğinde komutun ilk **%36'sını** çıkışa hiç geçirmiyordu. Küçük genlikli limit çevrimleri bu yüzden doğamıyordu — bu sönüm değil, bir eşik.
+
+Ayrım pratik: ölü bölge çırpıntıyı gizler ama hassasiyeti de öldürür. Mutlak konumlandırmada ölçtüğümüz 0.02–0.05°, L298N'de mümkün olmazdı.
 
 ### MCU çökerse motor durmuyor
 
@@ -163,7 +174,7 @@ A desktop haptic rotary knob: BLDC gimbal motor driven with FOC, software-define
 The valuable part of this repo is the **measured findings**, not the code:
 
 - **Detent strength comes from spacing, instability comes from stiffness.** For a sawtooth profile, peak torque = `Kdet × spacing / 2` but the boundary slope is just `Kdet`. Raising stiffness buys no strength and costs stability. SimpleFOC's own haptic example uses a 45° attractor distance with P=10.
-- **Damping destabilizes this system.** Six measurements agree. Delayed velocity estimation turns the damping term into added stiffness, pushing the resonance up until it self-sustains. SimpleFOC's haptic example uses D=0.
+- **Damping destabilizes this system.** Six measurements agree. (Caveat added 14.10: the motor's own electrical damping `b_el = Kt·Ke/R ≈ 5.6e-4 N·m·s/rad` is NOT negligible, contrary to what we assumed — so sampled-data passivity is satisfied with ~27x margin and does not explain the instability.) Delayed velocity estimation turns the damping term into added stiffness, pushing the resonance up until it self-sustains. SimpleFOC's haptic example uses D=0.
 - **SimpleFOC's `min_elapsed_time` (default 100 µs) returns a stale velocity** if your loop period approaches it. Moving FOC to its own core raised our rate only 27% but crossed that threshold and caused chatter. Setting it to 500 µs fixed it.
 - **A hard-wired driver enable pin is dangerous.** After a power cut our MCU never booted but stayed powered; the L6234 stayed enabled with floating inputs and drove the motor for two days. Use a GPIO with a 10k pull-down, or a driver with internal pull-downs (DRV8316).
 - Tried and rejected: PLL tracking observer (oscillation moved 44 → 74 Hz), detent-center hysteresis (better numbers, worse feel), sine torque profile (stable but 1/3 the peak force).

@@ -266,9 +266,21 @@ int   detProfile = 0;    // 0 = testere. Sinus (1) denendi: kararli ama tepe kuv
 float dampRatio = 0.0f;
 float phaseR  = 2.75f;    // OLCULDU: faz-faz 5.51 ohm (uc kombinasyon da ayni) -> yildiz sarim, /2
 float motorKV = 140.0f;   // Motor etiketi: 2805, 140KV -> Ke = 1/(KV*sqrt3*RPM_TO_RADS) = 0.0394 V.s/rad
-bool  estMode = false;    // KAPALI (kararli ayar bunsuz bulundu). Olculdu: 305 derece uctan uca savurma -> 238ms'de TAM durdu
-                          // (son 80ms hiz std = 0.000). Est kapaliyken cok daha az enerjiyle
-                          // hic durmuyordu. 'E' ile kapatilabilir.
+bool  estMode = false;    // KAPALI (kararli ayar bunsuz bulundu). 'E' ile acilir.
+// 14.10 UYARI -- buradaki eski "olcum" SILINDI, GECERSIZDI:
+//   "305 derece uctan uca savurma -> 238ms'de TAM durdu (son 80ms hiz std = 0.000)"
+// 305 derece, toplam araligin (319.6) %95'i. Knob sonumlendigi icin degil, FIZIKSEL DUVARA
+// CARPTIGI icin durdu; "hiz std = 0" sonmeyi degil duvara dayanmis olmayi anlatiyor.
+// Yorum silinmeden kaldigi icin sonradan "est modu sonumu artiriyor" diye kaynak gosterildi
+// ve yanilttii. Est modunun sonume etkisi hakkinda ELIMIZDE OLCUM YOK.
+//
+// Beklenen etki (hesap, olculmedi): voltaj modunda tork = (Kt/R)(Uq - Ke*w). Ikinci terim
+// hiza orantili KARSI tork, yani bir sonum: b_el = Kt*Ke/R = 0.0394^2/2.75 = 5.6e-4 N.m.s/rad.
+// Est modu Ke*w'yi ileri beslemeyle telafi ettigi icin bu sonumu de siler. Tek gercek
+// sonumumuz o oldugundan RISKLI.
+// Ek belirsizlik: motor.KV_rating DOGRUDAN atanıyor (asagida), kutuphanenin yapicisindaki
+// _KV*_SQRT2 yolu atlaniyor -> telafi sabiti 0.0682 mi 0.0482 mi 0.0394 mu belirsiz (1.73x).
+// Telafi gercek Ke'den buyukse net sonum NEGATIF olur.
 float revThrK = 0.6f;    // yon degistirme esigi (x centik araligi). 0.6=eski simetrik, 1.0=yeni
 float vHalf   = 1.2f;    // sonum devreye girme hizi (rad/s). |v|<<vHalf -> sonum ~0 (durakta vizilti yok)
                          // |v|>>vHalf -> tam sonum (cevirip birakinca cinlamayi yutar)
