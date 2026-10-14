@@ -8,15 +8,49 @@ local M = {}
 M.knobMode = "volume"          -- knob firmware modu (serial'dan / hotkey'den takip edilir)
 
 -- ---------- port + gonderme ----------
-local function knobPort()
-  local o = hs.execute("ls /dev/cu.usbmodem* 2>/dev/null | grep -v 1101 | grep -v 2101 | head -1")
-  return (o or ""):gsub("%s+$", "")
+-- 14.10 BELLEK DUZELTMESI. Eski hali her gonderimde IKI surec aciyordu:
+-- knobPort() icin hs.execute (ls|grep|head) + yazmak icin hs.task (/bin/sh printf).
+-- Canli surecte olculdu: hs.execute 2.4 KB, hs.task 2.7 KB KALICI iz birakiyor,
+-- io.open+write+close SIFIR birakiyor. Iz ObjC tarafinda duruyor ve ancak Lua GC'si
+-- calisinca serbest kaliyor; ama Lua yigini ~900 KB oldugu icin GC neredeyse hic
+-- tetiklenmiyor. Sonuc: 7 gunde 824 MB. (Asil kaynak brLevel'in 2 sn'lik ioreg'iydi,
+-- asagida gcTimer ile cozuldu; burada surec acmayi tamamen kaldiriyoruz.)
+local portCache, portCheckedAt = nil, 0
+local PORT_TTL = 30            -- sn: port onbellegi bu kadar sure gecerli
+
+local lastSent = {}            -- komut -> son gonderilen tam satir (gereksiz tekrari keser)
+
+local function portLost()      -- yazma hatasi: port degismis/cikmis olabilir, hemen yeniden ara
+  portCache, portCheckedAt, lastSent = nil, 0, {}
 end
 
-local function sendLine(line)
+local function findPort()
+  local o = hs.execute("ls /dev/cu.usbmodem* 2>/dev/null | grep -v 1101 | grep -v 2101 | head -1")
+  local p = (o or ""):gsub("%s+$", "")
+  if p == "" then return nil end
+  return p
+end
+
+local function knobPort()
+  local now = hs.timer.secondsSinceEpoch()
+  if (now - portCheckedAt) < PORT_TTL then return portCache end   -- nil sonuc da onbellekli
+  portCheckedAt = now
+  portCache = findPort()
+  return portCache
+end
+
+-- force=true -> onbellegi atla (mod girisinde knob yeniden baslamis olabilir).
+-- SYNC hicbir zaman atlanmaz: el sikismasinin kendisi o.
+local function sendLine(line, force)
   local p = knobPort()
-  if p == "" then return end
-  hs.task.new("/bin/sh", nil, {"-c", string.format("printf '%s\\n' > %s", line, p)}):start()
+  if not p then return end
+  local key = line:match("^(%S+)") or line
+  if not force and key ~= "SYNC" and lastSent[key] == line then return end
+  local f = io.open(p, "w")
+  if not f then portLost(); return end
+  local ok = pcall(f.write, f, line, "\n")
+  f:close()
+  if ok then lastSent[key] = line else portLost() end
 end
 
 -- ---------- durum kaynaklari ----------
@@ -111,17 +145,17 @@ local lastV, lastN, lastIdx = -1, -1, -1
 local function pushState()
   if M.knobMode == "volume" then
     local v = volLevel(); lastV = v
-    sendLine("VOL " .. v); hs.printf("[knob] volume girdi -> VOL %d", v)
+    sendLine("VOL " .. v, true); hs.printf("[knob] volume girdi -> VOL %d", v)
   elseif M.knobMode == "spaces" then
     local n, idx = spacesInfo()
-    if n then lastN, lastIdx = n, idx; sendLine(string.format("SP %d %d", n, idx))
+    if n then lastN, lastIdx = n, idx; sendLine(string.format("SP %d %d", n, idx), true)
       hs.printf("[knob] spaces girdi -> SP %d %d", n, idx) end
   elseif M.knobMode == "tabs" then
     local n, idx = tabsInfo()
-    if n then lastN, lastIdx = n, idx; sendLine(string.format("TAB %d %d", n, idx))
+    if n then lastN, lastIdx = n, idx; sendLine(string.format("TAB %d %d", n, idx), true)
       hs.printf("[knob] tabs girdi -> TAB %d %d", n, idx) end
   elseif M.knobMode == "brightness" then
-    local v = brLevel(); if v then lastV = v; sendLine("BR " .. v) end   -- okunamazsa LED optimistik kalir
+    local v = brLevel(); if v then lastV = v; sendLine("BR " .. v, true) end   -- okunamazsa LED optimistik kalir
   end
 end
 
@@ -142,7 +176,7 @@ local function enterTabs()
   local function try()
     tries = tries + 1
     local n, idx = tabsInfo()             -- Chrome frontmost ise gercek sayi doner
-    if n then lastN, lastIdx = n, idx; sendLine(string.format("TAB %d %d", n, idx))
+    if n then lastN, lastIdx = n, idx; sendLine(string.format("TAB %d %d", n, idx), true)
       hs.printf("[knob] tabs -> TAB %d %d", n, idx)
     elseif tries < 8 then hs.timer.doAfter(0.25, try) end   -- Chrome one gelene kadar dene
   end
@@ -298,6 +332,12 @@ end)
 M.mouseTap:start()
 -- yedek: eventtap durursa (izin kaybi vb.) 3 sn'de bir yine de bak
 M.screenPoll = hs.timer.doEvery(3.0, checkScreen)
+-- 14.10: ASIL SIZINTI COZUMU. brLevel() 2 sn'de bir ioreg icin kabuk aciyor; her cagri
+-- ObjC tarafinda ~2.4 KB iz birakiyor ve bu ancak Lua GC'si calisinca serbest kaliyor.
+-- Lua yigini ~900 KB oldugu icin GC kendiliginden neredeyse hic tetiklenmiyor ->
+-- 7 gunde 824 MB. Bu yigin boyutunda dakikada bir tam toplama olculemeyecek kadar ucuz.
+M.gcTimer = hs.timer.doEvery(60, function() collectgarbage("collect") end)
+
 M.brPoll = hs.timer.doEvery(2.0, function()
   onBright()
   if M.knobMode == "tabs" then onTabs() end
@@ -328,5 +368,5 @@ hs.timer.doAfter(0.6, function() sendLine("SYNC") end)
 M.syncTimer = hs.timer.doEvery(10, function() sendLine("SYNC") end)
 hs.timer.doAfter(1.2, pushState)   -- aciliste bir kez sync (mevcut mod)
 hs.alert.show("SmartKnob HS (mode-entry sync) ✓", 1.2)
-hs.printf("[knob] yuklendi. port=%s hs.spaces=%s", knobPort(), tostring(hs.spaces ~= nil))
+hs.printf("[knob] yuklendi. port=%s hs.spaces=%s", tostring(knobPort()), tostring(hs.spaces ~= nil))
 return M
