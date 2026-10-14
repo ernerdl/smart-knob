@@ -1,5 +1,5 @@
 // SmartKnob — ASAMA 1: OPEN-LOOP velocity testi (sensORSUZ)
-// Amac: motor + L298N + baglanti dogru mu? Motor canlaniyor mu?
+// Amac: motor + L6234PD + baglanti dogru mu? Motor canlaniyor mu?
 // Sensor YOK, kalibrasyon YOK. Sadece 3 fazi surup donmeye calismasini gormek.
 //
 // GUVENLIK: voltage_limit = 2V ile baslar (2V / 6ohm = 0.33A). Seri porttan

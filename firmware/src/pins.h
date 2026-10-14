@@ -6,21 +6,26 @@
 // Hepsi SOL sirada, bitisik ve derli toplu (bkz docs/01_pinout.md fiziksel harita)
 // SOL sira: 3V3 3V3 RST | 4 5 6 7 15 16 17 18 8 3 46 9 10 11 12 13 14 | 5V GND
 
-// --- Motor (L298N, 3PWM) — 3 pin YAN YANA ---
+// --- Motor surucusu: L6234PD (3PWM) — 3 pin YAN YANA ---
+// (ESKIDEN L298N idi, 21.08.2026'da degisti. Pin NUMARALARI ayni kaldi.)
 #ifndef PIN_MOTOR_A
-#define PIN_MOTOR_A   15   // GPIO15 -> L298N IN1 (phase U)
+#define PIN_MOTOR_A   15   // GPIO15 -> L6234 IN1 (phase U), seri 1k
 #endif
 #ifndef PIN_MOTOR_B
-#define PIN_MOTOR_B   16   // GPIO16 -> L298N IN2 (phase V)
+#define PIN_MOTOR_B   16   // GPIO16 -> L6234 IN2 (phase V), seri 1k
 #endif
 #ifndef PIN_MOTOR_C
-#define PIN_MOTOR_C   17   // GPIO17 -> L298N IN3 (phase W)
+#define PIN_MOTOR_C   17   // GPIO17 -> L6234 IN3 (phase W), seri 1k
 #endif
-// L298N ENA + ENB -> sabit HIGH. IN4 kullanilmaz. Motor OUT1/2/3.
+// L6234'un EN'i (EN1/EN2/EN3 birlesik) su an 3.3V'a SABIT.
+// !! ACIK RISK: ESP bootloader'da/takili kalirsa GPIO'lar bosta kalir ama surucu ACIK kalir
+//    ve motoru rastgele surer. 2 gun suren titreme + eriyen braket bu yuzden oldu (bkz README).
+//    Yapilacak: EN -> bir GPIO + GND'ye 10k pull-down (IN1/2/3'e de ayni). Firmware EN'i
+//    setup sonunda gec acar. O zamana kadar: BOOT moduna almadan ONCE 12V'u kes.
 
 // --- Sensor + butonlar (I2C, ortak hat) — SDA/SCL yan yana ---
 #ifndef PIN_I2C_SDA
-#define PIN_I2C_SDA   5    // GPIO5  -> AS5600 SDA + PCF8574 SDA
+#define PIN_I2C_SDA   5    // GPIO5  -> (eski AS5600 SDA) — MT6701 SSI'ya gecildi, bkz PIN_MT_*
 #endif
 #ifndef PIN_I2C_SCL
 #define PIN_I2C_SCL   6    // GPIO6  -> AS5600 SCL + PCF8574 SCL

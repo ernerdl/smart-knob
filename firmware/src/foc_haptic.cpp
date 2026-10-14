@@ -1,8 +1,9 @@
-// SmartKnob — CLOSED-LOOP FOC + haptik (gercek AS5600 + motor)
+// SmartKnob — CLOSED-LOOP FOC + haptik (MT6701 SSI + motor)
 // SADECE `pio run -e foc`.
 // Bu, open-loop'un "sik sik"ini bitirir: sensor rotorun yerini bilir, tork orantili uygulanir.
 //
-// Baglanti: AS5600 I2C GPIO5/6 (3.3V), motor L298N GPIO15/16/17, 12V + ortak GND.
+// Baglanti: MT6701 SSI (CLK 6 / DO 5 / CSN 7, 3.3V), motor L6234PD GPIO15/16/17 (seri 1k),
+// 12V + ortak GND. (Tarihce: once AS5600 I2C + L298N idi; sensor 27.08, surucu 21.08 degisti.)
 // GUVENLIK: voltage_limit DUSUK (3V) baslar; serial 'v <volt>' ile artir, isiyi izle.
 //
 // Komutlar (UART/CH340):
@@ -81,6 +82,32 @@ float volSpacing = 0.220f; // 12.6 deg — 25 centik. ARALIK = GUC (tepe kuvvet 
 static bool     centering = false;
 static uint32_t centerStart = 0;
 static float    centerTarget = 0;  // ortalamanin hedefi: bar modlarinda SEVIYENIN acisi, digerlerinde orta
+static bool     gotoActive = false; // 'g' TEST komutu: hedef elle verildi, seviye takibi yapma
+// MUTLAK KONUM TUTMA (14.10): varisin son 3 derecesi, centikten BAGIMSIZ.
+// Yay tek basina surtunmeyi yenemiyor (0.5 deg'de kaliyordu). Integral: hedefe yakin ama
+// varamamissa itme zamanla buyur, surtunmeyi yenince knob son kismi da gider.
+static bool     posHold = false;
+static float    posI = 0;            // birikmis itme (V)
+static uint32_t posLastUs = 0, posInTolSince = 0, posHoldStart = 0;
+static const float POS_KH   = 22.0f;   // tutma yayi (V/rad) -- olculu kararli sertlik
+static const float POS_BH   = 0.05f;   // tutma sonumu -- olculu kararli deger
+static const float POS_KI   = 100.0f;  // integral (V/rad/s)
+static const float POS_IFLR = 0.5f * PI / 180.0f;  // integral TABANI: hata bundan kucukse bu kadarmis
+                                       // gibi integre et. Saf 100*e formu kucuk hatada felc oluyordu:
+                                       // 0.133 deg'de 0.23 V/s -> tavana 2.6 sn, zaman asimi 3 sn.
+                                       // Taban ile 0.87 V/s -> 1.7 sn. (14.10 olcumu)
+static const float POS_IMAX = 2.5f;    // integral tavani (V). 1.5'te sol duvarda yetmemisti (0.90'da
+                                       // sikisip kalmisti, hata 0.133 deg).
+static const float POS_KTRV = 22.0f;   // YOL fazi sertligi. Eskiden Kcenter=6 kullaniliyordu -- o deger
+                                       // "mod degisince kabaca ortaya it" rutininden miras, konumlandirma
+                                       // icin secilmemisti. Takilma hatasi = surtunme / sertlik:
+                                       //   6  -> 0.318V/6  = 3.04 deg  -> 3 deg'lik tutma kapisinin DISI
+                                       //   22 -> 0.318V/22 = 0.83 deg  -> rahat icerde
+                                       // Kilitlenmenin koku buydu: integral yaklasmak icin gerekli,
+                                       // yaklasmak da integrali acmak icin. Tutma fazi 22'yi zaten
+                                       // kararli kullaniyor. Nazik ortalama (space/tabs) Kcenter=6'da kalir.
+static const float POS_TOL  = 0.05f * PI / 180.0f;  // varis toleransi: 0.05 deg (~2 sensor adimi)
+static const float POS_NEAR = 3.0f  * PI / 180.0f;  // bu kadar yaklasinca tutma fazina gec
 static float    Kcenter = 6.0f;   // ortalama yayi (NAZIK -> kullanici kolayca override eder)
 
 // ================= DEPLOY KASA KILIDI =================
@@ -389,6 +416,7 @@ static void applyMode(AppMode m) {
   //   aninda iptal (asagida pushingAway). forcing iki kez "kavga ediyor" diye iptal
   //   edilmisti; fark, surekli kovalamamasi.
   // DIGER modlar (space/tabs): eskisi gibi -- sadece duvara yakinsa ortaya al.
+  gotoActive = false; posHold = false; posI = 0;
   if (barMode()) {
     centerTarget = levelAngle(level);
     centering = fabsf(motor.shaft_angle - centerTarget) > 0.05f;
@@ -844,6 +872,11 @@ static void handleLine(String s) {
     Serial.println("bitti — LED'leri tekrar surmek icin karti RESETLE");
   }
   else if (c=='L') { fill_solid(leds, NLED, CRGB(120,120,120)); FastLED.show(); Serial.println("LED test: hepsi beyaz"); }
+  else if (c=='g') {   // TEST: knob'u MUTLAK aciya gonder (derece). Ortalama mekanizmasi: 2.5V tavan, itince iptal.
+    centerTarget = v.toFloat() * PI / 180.0f;
+    gotoActive = true; centering = true; centerStart = millis(); posHold = false; posI = 0;
+    Serial.printf("GOTO basla hedef=%.1f simdi=%.1f\n", centerTarget*180.0f/PI, motor.shaft_angle*180.0f/PI);
+  }
   else if (c=='w') { wallMargin = v.toFloat() * PI / 180.0f; Serial.printf("wallMargin=%.1f deg\n", wallMargin*180.0f/PI); }
   else if (c=='W') { Kwall = v.toFloat(); Serial.printf("Kwall=%.1f\n", Kwall); }
   else if (c=='P') {   // pole pairs degistir + yeniden kalibre (dogru pp'yi bulmak icin)
@@ -1099,20 +1132,64 @@ static void focStep() {
       // MOD GECISI KONUMLANDIRMA: hedef = centerTarget (bar: seviyenin acisi, diger: orta).
       // Bar modunda hedef yolda CANLI: HS'in VOL/BR'si ortalama surerken gelirse yeni seviyeye
       // yonelir. Varinca kapanir, sonrasinda HS motoru surmez.
-      if (barMode()) centerTarget = levelAngle(level);
+      if (barMode() && !gotoActive) centerTarget = levelAngle(level);
       float e = motor.shaft_angle - centerTarget;
-      t = -Kcenter * e;
-      t -= 0.35f * shaftVel();   // DUSUK sonum: gurultu buyutup titretmez (yuksek sonum titreme enjekte eder)
-      bool reached     = fabsf(e) < 0.05f && fabsf(shaftVel()) < 0.5f;   // ortaya oturdu
-      bool pushingAway = (e * shaftVel()) > 2.0f;                         // kullanici merkezden UZAGA itiyor -> DOKUNDU
+      bool absPosNow = gotoActive || barMode();
+      // Tutma fazina gecis: yakinsa VEYA (nerede olursa olsun) takilip kalmissa.
+      // Takilma kapisi ikinci savunma hatti: sertlik yetmezse bile integral devreye girer.
+      bool stalled = fabsf(shaftVel()) < 0.3f && millis() - centerStart > 400;
+      if (absPosNow && !posHold && (fabsf(e) < POS_NEAR || stalled) && fabsf(shaftVel()) < 1.0f) {
+        posHold = true; posI = 0; posLastUs = micros(); posInTolSince = 0; posHoldStart = millis();
+      }
+      if (posHold && fabsf(e) > 2.0f * POS_NEAR) { posHold = false; posI = 0; }   // hedef kaydi (VOL geldi) -> yola don
+      if (posHold) {
+        uint32_t nowUs = micros();
+        float dt = (nowUs - posLastUs) * 1e-6f; posLastUs = nowUs;
+        if (dt > 0.01f) dt = 0.01f;
+        if (fabsf(e) > POS_TOL) {   // tolerans icinde DONDUR (avlanma olmasin)
+          float em = fabsf(e) < POS_IFLR ? (e > 0 ? POS_IFLR : -POS_IFLR) : e;   // taban
+          posI = _constrain(posI + POS_KI * em * dt, -POS_IMAX, POS_IMAX);
+        }
+        t = -POS_KH * e - POS_BH * shaftVel() - posI;
+      } else {
+        t = -(absPosNow ? POS_KTRV : Kcenter) * e;
+        t -= 0.35f * shaftVel();   // DUSUK sonum: gurultu buyutup titretmez (yuksek sonum titreme enjekte eder)
+      }
+      // MUTLAK KONUMLANDIRMA (bar modu girisi veya 'g'): yarim centik icine girip yavaslayinca
+      // isi CENTIGE devret. Ortalama yayi (Kcenter=6) son 3 derecede ~0.3V uretiyor, surtunmeyi
+      // zor yeniyor; centik ise 22-30 V/rad -> son dereceleri tam merkeze ceker.
+      // 'itersen birak' burada YOK: kullanici mod degistirirken knob'u tutmuyor (14.10 karari),
+      // ve tam voltajda ufak bir asma bu kontrolu yanlislikla tetikliyordu.
+      bool absPos      = gotoActive || barMode();
+      bool reached;
+      if (absPos) {
+        if (posHold && fabsf(e) < POS_TOL) { if (!posInTolSince) posInTolSince = millis(); }
+        else posInTolSince = 0;
+        reached = posHold && posInTolSince && (millis() - posInTolSince > 50);
+      } else {
+        reached = fabsf(e) < 0.05f && fabsf(shaftVel()) < 0.5f;   // ortaya oturdu
+      }
+      bool pushingAway = !absPos && (e * shaftVel()) > 2.0f;   // kullanici merkezden UZAGA itiyor -> DOKUNDU
       // Zaman asimi: bar modunda yol 311 deg'e kadar cikabiliyor (326 -> 14.7). Hiz 2.5V/0.35
       // sonumle ~7 rad/s'de doyuyor -> ~0.8 sn. Eski 700 ms yarida keserdi.
-      uint32_t tmo = barMode() ? 1500 : 700;
+      uint32_t tmo = gotoActive ? 3000 : barMode() ? 1500 : 700;
       if (reached || pushingAway || millis() - centerStart > tmo) {
         centering = false;
         // Vardiysa grid'i MUTLAK hedefe hizala (sonraki adimlar seviyeyle ayni yerde kalsin).
         // Kullanici dokunduysa/zaman asimiysa bulundugu yerden goreli devam -- hedefe cekme = kavga.
-        relAnchor = reached ? centerTarget : motor.shaft_angle;
+        // Vardiysa grid'i TAM hedefe hizala: hem relAnchor hem hapCenter. hapCenter kendiliginden
+        // ancak 3 centikten uzaga gidilince hizalaniyordu -> kisa gidislerde (50->20) knob eski
+        // grid'in merkezine cekiliyordu.
+        // Grid'i HER ZAMAN hedefe sabitle (zaman asiminda bile). Eskiden zaman asiminda
+        // knob'un TAKILDIGI yere sabitleniyordu -> "seviye <-> aci" eslemesi sessizce bozuluyordu
+        // ve takildigi nokta kendisi centik merkezi oldugu icin orada kaliyordu (hatayi gizliyordu).
+        // Hedefe sabitleyince knob en yakin centige oturur, esleme korunur, kendini duzeltir.
+        if (absPos) { relAnchor = centerTarget; hapCenter = centerTarget; }
+        else relAnchor = motor.shaft_angle;
+        if (gotoActive) Serial.printf("GOTO hedef=%.2f hata=%+.3f I=%.2fV ", centerTarget*180.0f/PI,
+                                      (motor.shaft_angle - centerTarget)*180.0f/PI, posI);
+        posHold = false; posI = 0;
+        gotoActive = false;
         Serial.printf("ORTALAMA bitti (%s) aci=%.1f\n",
           reached ? "oturdu" : pushingAway ? "kullanici-dokundu" : "timeout", motor.shaft_angle*180.0f/PI);
       }
@@ -1121,7 +1198,8 @@ static void focStep() {
       t = hapticTorque(motor.shaft_angle);
       t -= dampTorque(shaftVel());   // dampTorque icinde etkin sonum secilir
     }
-    float vmax = centering ? 2.5f : motor.voltage_limit;   // ortalama NAZIK (dusuk V, savasamaz)
+    // ortalama NAZIK (dusuk V, savasamaz) -- ama mutlak konumlandirmada TAM voltaj ("lak diye gitsin").
+    float vmax = (centering && !(gotoActive || barMode())) ? 2.5f : motor.voltage_limit;
     lastT = _constrain(t, -vmax, vmax);
     motor.move(estMode ? lastT / phaseR : lastT);   // est modda target = AKIM
     if (bIdx == -2 && fabsf(motor.shaft_velocity) > bTrigV) { bIdx = 0; bT0 = micros(); }   // tetik
@@ -1173,7 +1251,8 @@ void setup() {
 
   driver.voltage_power_supply = MOTOR_SUPPLY_V;   // 12V
   driver.voltage_limit        = 8.0f;   // align 7V'a izin ver
-  driver.pwm_frequency        = 20000;  // 20kHz: isitilebilir ugultu azalir (L298N icin sinirda, isiyi izle)
+  driver.pwm_frequency        = 20000;  // 20kHz: isitilebilir ugultu duyulmaz. L6234 icin rahat
+                                        // (L298N'de sinirdaydi, o not artik gecersiz).
   if (!driver.init()) { Serial.println("HATA driver.init"); return; }
   motor.linkDriver(&driver);
 
