@@ -81,6 +81,7 @@ float volSpacing = 0.220f; // 12.6 deg — 25 centik. ARALIK = GUC (tepe kuvvet 
 // SABIT hedefe (orta) gider, DEGERE degil -> kovalanan hareketli hedef yok, forcing gibi savasamaz.
 static bool     centering = false;
 static uint32_t centerStart = 0;
+static uint32_t centerEndAt = 0;  // konumlandirma bitisi: kisa sure adim uretme
 static float    centerTarget = 0;  // ortalamanin hedefi: bar modlarinda SEVIYENIN acisi, digerlerinde orta
 static bool     gotoActive = false; // 'g' TEST komutu: hedef elle verildi, seviye takibi yapma
 // MUTLAK KONUM TUTMA (14.10): varisin son 3 derecesi, centikten BAGIMSIZ.
@@ -289,6 +290,7 @@ float wallMargin = 0.14f;// duvar ihtiyat payi (rad ~8°): centikler bu payin IC
 
 // seviye <-> aci + LED yardimcilari
 static float midA() { return 0.5f * (minA + maxA); }
+static bool barMode();   // ileri bildirim: levelAngle/detentIndex kullaniyor
 // KURAL: BAR modlari (ses/parlaklik) SOL DUVARDAN baslar -- sayilari sabit (17), uctan uca
 // eslesme anlamli: sonuna kadar sola cevir = en kisik. DIGER modlar (spaces/tabs) ORTADA toplu,
 // cunku sayilari degisken (2/4/8) ve degisken sayiyi 320 dereceye yaymak sacma olurdu.
@@ -304,7 +306,15 @@ static float midA() { return 0.5f * (minA + maxA); }
 // Bugun duvarlar olculu ve sabit, yani istenirse bar modlari icin geri getirilebilir.
 static float detentSpacing() {
   if (appMode == APP_SCROLL) return 0.055f;   // INCE -> responsive scroll (her ~3° 1 tekerlek tiki)
-  return (appMode == APP_VOLUME || appMode == APP_BRIGHTNESS) ? volSpacing : spaceSpacing;
+  // BAR MODLARI (15.10): aralik KADEME SAYISINDAN hesaplanir, sabit degil.
+  // Eskiden volSpacing=0.220 (12.6 deg) sabitti: 17 kademe 201.6 deg kapliyor, kullanilabilir
+  // 303.6 deg'in ~100 derecesi OLU kaliyordu (knob donuyor ama seviye uclarda sikisiyor).
+  // Simdi kademeler tum araligi tam dolduruyor: uca kadar cevir = tavan/taban.
+  if (barMode() && detents > 1) {
+    float usable = (maxA - wallMargin) - (minA + wallMargin);
+    return usable / (detents - 1);
+  }
+  return spaceSpacing;
 }
 static float firstAngle() {   // ilk centigin (index 0) acisi
   // bar modlari (ses/parlaklik) sol duvardan; digerleri aralik ortasina toplu.
@@ -313,10 +323,29 @@ static float firstAngle() {   // ilk centigin (index 0) acisi
     return midA() - 0.5f * (detents - 1) * spaceSpacing;   // ortala
   return minA + wallMargin;                                 // sol duvardan basla
 }
-static float levelAngle(int lv) { return firstAngle() + lv * detentSpacing(); }
+// BAR MODLARI MUTLAK ESLEME (15.10).
+// Seviye <-> aci eslemesi KULLANICI yonune (knobDir) gore kurulur. knobDir=-1 iken aci
+// buyudukce seviye DUSER, yani seviye 0 yuksek acida (kullanicinin SOLU) olur.
+// Eskiden levelAngle seviyeyi hep artan aciya esliyordu; knobDir=-1 ile bu TERSTI --
+// ses 0 kullanicinin sagina dusuyordu. Mod girisinde knob yanlis uca gidiyordu.
+static float barLevel0()  { return (knobDir > 0) ? (minA + wallMargin) : (maxA - wallMargin); }
+static float levelAngle(int lv) {
+  if (barMode()) return barLevel0() + knobDir * lv * detentSpacing();
+  return firstAngle() + lv * detentSpacing();
+}
+// acinin SUREKLI seviye karsiligi (0.0 = seviye 0, 1.0 = seviye 1 ...)
+static float levelPos(float a) { return (a - barLevel0()) * knobDir / detentSpacing(); }
+// HS'ten yeni seviye geldiginde knob'u O KONUMA goturur (motorlu fader).
+// 15.10: cift yonlu haberlesmenin eksik yarisi buydu. Temmuz'daki 'forcing' iki kez iptal
+// edilmisti cunku knob'u SUREKLI kovaliyordu ve kullaniciyla kavga ediyordu. Burada kavga
+// YAPISAL OLARAK yok: eslesme mutlak oldugu icin kullanici knob'u cevirince HS'in geri
+// yolladigi seviye zaten knob'un bulundugu acinin seviyesi -> fark sifir -> hareket yok.
+// Knob sadece ses/parlaklik BASKA bir kaynaktan degisince kimildiyor (klavye, Control Center).
+static void gotoLevel(int lv);
 static int   detentIndex(float a) {
   if (detents <= 1) return 0;
-  int i = (int)roundf((a - firstAngle()) / detentSpacing());
+  int i = barMode() ? (int)roundf(levelPos(a))
+                    : (int)roundf((a - firstAngle()) / detentSpacing());
   return constrain(i, 0, detents - 1);
 }
 static bool barMode() { return appMode == APP_VOLUME || appMode == APP_BRIGHTNESS; }  // dolan-bar modlari (ses/parlaklik)
@@ -387,6 +416,20 @@ static void sendStep(int dir) {
 }
 
 // Mod uygula (MODE komutu VE PCF butonu ayni yoldan kullanir)
+// (tanim: centering/centerTarget yukarida tanimli)
+static void gotoLevel(int lv) {
+  float tgt = levelAngle(lv);
+  if (fabsf(motor.shaft_angle - tgt) < 0.5f * detentSpacing()) { relAnchor = tgt; return; }  // zaten orada
+  centerTarget = tgt;
+  centering    = true;  centerStart = millis();
+  posHold      = false; posI = 0;
+  gotoActive   = false;
+  relAnchor    = tgt;
+  pendingHid   = 0;   // KRITIK: birikmis adimlar bosalirsa her biri seviyeyi degistirir ->
+                      // HS yeni degeri yollar -> knob yine hareket eder -> kacak dongu.
+                      // Parlaklik 16'dan 0'a boyle indi (10:44 kaydi).
+}
+
 static void applyMode(AppMode m) {
   appMode = m;
   // Onbellekten YUKLE: HS'i beklemeden dogru degeri goster (yoksa -1 -> makul varsayilan)
@@ -429,13 +472,17 @@ static void applyMode(AppMode m) {
   //   edilmisti; fark, surekli kovalamamasi.
   // DIGER modlar (space/tabs): eskisi gibi -- sadece duvara yakinsa ortaya al.
   gotoActive = false; posHold = false; posI = 0;
+  if (barMode()) relAnchor = levelAngle(level);   // haptik grid MUTLAK (seviye <-> aci sabit)
   if (barMode()) {
     centerTarget = levelAngle(level);
     centering = fabsf(motor.shaft_angle - centerTarget) > 0.05f;
   } else {
     centerTarget = midA();
     float half = (maxA - minA) * 0.5f;
-    centering = (half > 0.15f) && (fabsf(motor.shaft_angle - centerTarget) > half * 0.55f);
+    // 15.10: HER ZAMAN ortala. Eskiden sadece duvara half*0.55 (87.5 deg) kadar yakinsa
+    // ortaliyordu; knob bir uca yakinken moda girilince o yone hareket KAPALI kaliyordu
+    // (grid bulundugun yere capalandigi icin). Artik grid hep ortada, iki yone de yer var.
+    centering = (half > 0.15f) && (fabsf(motor.shaft_angle - centerTarget) > 0.05f);
   }
   centerStart = millis();
   Serial.printf("MOD %d -> ortalama=%d hedef=%.1f\n", (int)m, centering ? 1 : 0, centerTarget*180.0f/PI);
@@ -810,14 +857,20 @@ static void handleLine(String s) {
   if (s.startsWith("VOL")) {   // Mac ses senkronu -> SADECE LED barini boyar (motoru SURMEZ)
     stVol = constrain((int)s.substring(3).toInt(), 0, 16);               // HER ZAMAN sakla
     if (appMode == APP_VOLUME && millis() - lastUserMove > 400) {        // aktifse goster
-      level = constrain(stVol, 0, detents - 1); updateLED(level);
+      int nv = constrain(stVol, 0, detents - 1);
+      bool changed = (nv != level);
+      level = nv; updateLED(level);
+      if (changed) gotoLevel(level);   // ses baska yerden degisti -> knob o konuma gitsin
     }
     return;
   }
   if (s.startsWith("BR")) {    // parlaklik senkronu (HS) -> LED bar (motoru SURMEZ)
     stBr = constrain((int)s.substring(2).toInt(), 0, 16);                // HER ZAMAN sakla
     if (appMode == APP_BRIGHTNESS && millis() - lastUserMove > 400) {
-      level = constrain(stBr, 0, detents - 1); updateLED(level);
+      int nv = constrain(stBr, 0, detents - 1);
+      bool changed = (nv != level);
+      level = nv; updateLED(level);
+      if (changed) gotoLevel(level);   // parlaklik baska yerden degisti -> knob o konuma gitsin
     }
     return;
   }
@@ -1181,7 +1234,13 @@ static void focStep() {
       } else {
         reached = fabsf(e) < 0.05f && fabsf(shaftVel()) < 0.5f;   // ortaya oturdu
       }
-      bool pushingAway = !absPos && (e * shaftVel()) > 2.0f;   // kullanici merkezden UZAGA itiyor -> DOKUNDU
+      // Kullanici itince IPTAL. 'g' testinde kapali; HS kaynakli konumlandirmada acik ama
+      // esik yuksek (5.0): tam voltajda ufak asma yanlislikla tetiklemesin (14.10 gozlemi).
+      // 15.10: mutlak konumlandirmada KAPALI. Varista hafif asma bunu yanlis tetikliyor
+      // (olculdu: hedef 90.6 iken 181.5'te "kullanici-dokundu" ile kesildi, kimse dokunmamisti).
+      // Knob yarida kalinca konum/seviye ayrisiyordu. Mod gecisi ve HS kaynakli hareketlerde
+      // kullanici knob'u tutmuyor; nazik ortalama (space/tabs) icin kontrol duruyor.
+      bool pushingAway = absPos ? false : (e * shaftVel()) > 2.0f;
       // Zaman asimi: bar modunda yol 311 deg'e kadar cikabiliyor (326 -> 14.7). Hiz 2.5V/0.35
       // sonumle ~7 rad/s'de doyuyor -> ~0.8 sn. Eski 700 ms yarida keserdi.
       uint32_t tmo = gotoActive ? 3000 : barMode() ? 1500 : 700;
@@ -1198,6 +1257,28 @@ static void focStep() {
         // Hedefe sabitleyince knob en yakin centige oturur, esleme korunur, kendini duzeltir.
         if (absPos) { relAnchor = centerTarget; hapCenter = centerTarget; }
         else relAnchor = motor.shaft_angle;
+        // KACAK DONGU KORUMASI (15.10). Konumlandirma HICBIR kosulda HID uretmemeli.
+        // Olan: varista hafif asma -> "kullanici itiyor" kontrolu yanlis tetikleniyor ->
+        // konumlandirma yarida kesiliyor -> knob rastgele acida kaliyor -> mutlak blok
+        // oradan seviye hesaplayip HID yolluyor -> ses/parlaklik degisiyor -> HS yeni
+        // degeri gonderiyor -> knob yine hareket ediyor. Parlaklik 10'dan 16'ya boyle
+        // tirmandi (10:41 kaydi).
+        // Cozum: bitiste seviyeyi KONUMDAN yeniden oku, HID GONDERME. Nerede biterse
+        // bitsin (vardi / zaman asimi / kullanici itti) durum tutarli kalir.
+        if (barMode()) {
+          level = detentIndex(motor.shaft_angle);
+          updateLED(level);
+          relAnchor = levelAngle(level);
+          hapCenter = relAnchor;
+          pendingHid = 0;
+        }
+        // 15.10: HER MODDA. Ortalama/konumlandirma HICBIR kosulda HID uretmemeli.
+        // Space'te "kullanici itiyor" iptali hizliyken yanlis tetiklenip centering'i
+        // kapatiyordu; knob suzulmeye devam edince kalan hareket adima sayilip
+        // Ctrl+Sag/Sol gidiyordu (kullanici gozlemi).
+        pendingHid = 0;
+        relAnchor  = barMode() ? relAnchor : motor.shaft_angle;   // grid durdugu yerden
+        centerEndAt = millis();
         if (gotoActive) Serial.printf("GOTO hedef=%.2f hata=%+.3f I=%.2fV ", centerTarget*180.0f/PI,
                                       (motor.shaft_angle - centerTarget)*180.0f/PI, posI);
         posHold = false; posI = 0;
@@ -1393,7 +1474,31 @@ void loop() {
     float thrRev = sp * revThrK;                     // yon degistir ('Y <k>' ile ayarlanir; 0.6=eski simetrik)
     float thrP = (lastStepDir >= 0) ? thrFwd : thrRev;   // ileri icin esik
     float thrN = (lastStepDir <= 0) ? thrFwd : thrRev;   // geri icin esik
-    if (d >  thrP) step = +1;
+    if (barMode()) {
+      // MUTLAK (15.10): konumun KENDISI seviye. Goreli adim yerine, acidan hesaplanan
+      // hedef seviyeye kac adim gerekiyorsa o kadar HID gonderilir. Adim kaybolsa ya da
+      // ses disaridan degisse bir sonraki cevirmede kendini duzeltir -- gercek bir
+      // potansiyometre gibi. Histerezis korunuyor (ayni yonde ucuz, yon degistirmek pahali).
+      float pL  = levelPos(motor.shaft_angle);
+      int   tgt = level;
+      float tp  = (lastStepDir >= 0) ? fwdThrK : revThrK;
+      float tn  = (lastStepDir <= 0) ? fwdThrK : revThrK;
+      while (pL > tgt + tp && tgt < detents - 1) tgt++;
+      while (pL < tgt - tn && tgt > 0)           tgt--;
+      if (tgt != level && millis() - modeSwitchAt > 150 && millis() - centerEndAt > 250) {
+        int delta = tgt - level;
+        lastStepDir = (delta > 0) ? +1 : -1;
+        pendingHid += delta;                 // kac adim gerekiyorsa o kadar
+        lastUserMove = millis();
+        level = tgt;
+        updateLED(level);
+        relAnchor = levelAngle(level);       // haptik grid de mutlak kalsin
+        if (dbgStep) Serial.printf("ABS seviye=%d (pos=%.2f) delta=%+d aci=%.1f\n",
+                                   level, pL, delta, motor.shaft_angle*180.0f/PI);
+      }
+      step = 0;                              // asagidaki goreli blok bar modlarinda calismaz
+    }
+    else if (d >  thrP) step = +1;
     else if (d < -thrN) step = -1;
     if (step != 0) lastStepDir = step;
     if (step != 0) {
@@ -1403,12 +1508,11 @@ void loop() {
       // kalibrasyonu (olculmus deger) DOGRU, o yuzden ona dokunmuyoruz; sadece
       // sayim/HID/LED yonunu ceviriyoruz. 'Y' degil, 'N' komutu ile degistirilir.
       int uStep = step * knobDir;
-      if (millis() - modeSwitchAt > 150) {
+      // modeSwitchAt: mod gecisi sonrasi sahte navigasyon yok.
+      // centerEndAt: ortalama bittikten sonra knob oturana kadar adim sayma (15.10).
+      if (millis() - modeSwitchAt > 150 && millis() - centerEndAt > 250) {
         pendingHid += uStep; lastUserMove = millis();
-        if (barMode()) {                                  // ses/parlaklik: LED bar seviyesi (0..detents-1)
-          level = constrain(level + uStep, 0, detents - 1);
-          updateLED(level);
-        } else if (appMode == APP_SCROLL) {               // scroll: donen nokta (wrap)
+        if (appMode == APP_SCROLL) {               // scroll: donen nokta (wrap)
           dispIdx = (dispIdx + uStep + NLED) % NLED;
           updateLED(dispIdx);
         } else {                                          // space/tabs: aktif index (iyimser; HS teyit eder)
@@ -1420,6 +1524,25 @@ void loop() {
     if (step != 0 && dbgStep)
       Serial.printf("STEP %+d aci=%.1f hiz=%.2f mode=%d\n",
         step, motor.shaft_angle*180.0f/PI, motor.shaft_velocity, (int)appMode);
+  }
+
+  // BOSTA KENDILIGINDEN ORTALAMA (15.10) — space/tabs icin.
+  // Kullanici space gezip biraktiginda knob bulundugu yerde kaliyordu; birkac tur sonra
+  // bir uca yaklasip o yone hareket kapaniyordu. Artik 5 sn hareketsizlikten sonra grid
+  // ve knob merkeze doner, her zaman iki yone de yer olur.
+  // Bar modlarinda YAPILMAZ: orada konum = seviye, ortalamak degeri bozar.
+  // pendingHid bitmeden yapilmaz (bekleyen space gecisleri kaybolmasin).
+  if (!barMode() && appMode != APP_SCROLL && mode == M_DETENT && depState == DEP_OFF
+      && !centering && pendingHid == 0 && !hidReleaseAt
+      && millis() - lastUserMove > 5000
+      && fabsf(motor.shaft_angle - midA()) > 0.5f * detentSpacing()) {
+    centerTarget = midA();
+    centering    = true;  centerStart = millis();
+    posHold      = false; posI = 0; gotoActive = false;
+    relAnchor    = midA();          // grid de merkeze
+    lastUserMove = millis();        // tekrar tetiklenmesin
+    if (dbgStep) Serial.printf("OTO-ORTALA aci=%.1f -> %.1f\n",
+                               motor.shaft_angle*180.0f/PI, midA()*180.0f/PI);
   }
   // --- PCF8574 buton (I2C1): herhangi butona basinca mod degistir (ses <-> masaustu) ---
   static uint32_t lastBtnPoll = 0;
