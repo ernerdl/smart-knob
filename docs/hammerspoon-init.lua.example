@@ -310,28 +310,27 @@ end
 --   tabs       -> Chrome'a AppleScript, PAHALI -> sadece o moddayken.
 M.onBrightNow = onBright   -- brKey icinden aninda tazeleme icin
 M.lastScreenU = nil
--- Fare ekran degisimi: macOS'ta dogrudan "ekran degisti" olayi yok, AMA mouseMoved bir
--- olay akisi olarak alinabiliyor. Sorun sikligi (hareket ederken saniyede yuzlerce).
--- SECIM GEREKCESI: bu CPU kazanci DEGIL, GECIKME kazanci. Eventtap kurunca macOS her
--- fare olayini HS uzerinden gecirir; fare hareket ederken yoklamadan PAHALI olur.
--- Ama fare duruyorken maliyet SIFIR (yoklama saniyede 2 kez calisiyordu) ve ekran
--- degisimi ANINDA yakalaniyor (yoklamada 0.5 sn'ye kadar gecikme vardi).
--- Cozum: olayi dinle, icinde neredeyse hicbir sey yapma — son bakistan 100 ms gecmediyse
--- hemen don. Boylece fare DURURKEN hicbir maliyet yok ve ekran degisimi ANINDA yakalaniyor.
-local lastCheck = 0
+-- Fare ekran degisimi: macOS'ta dogrudan "ekran degisti" olayi YOK.
+--
+-- 15.10 — EVENTTAP KALDIRILDI (SIZINTI). Once mouseMoved eventtap kullaniyorduk; gecikme
+-- kazanci icin secilmisti ve geri donus degeri false, icinde de neredeyse is yoktu.
+-- Ama OLCULDU (`heap` ile, ObjC nesne sayimi): 10 dakikada
+--     CGEvent    9 -> 24.840
+--     HIDEvent   3 -> 74.373
+-- Bu nesneler ObjC tarafinda kaliyor, collectgarbage() SERBEST BIRAKMIYOR. Dogrulama:
+-- mouseTap 150 sn durdurulunca artis 626/75sn -> 11/150sn'ye dustu. Yani sizinti
+-- callback'in icinde ne yaptigimizla ilgili degil, olaylarin HS'e tasinmasinin kendisinde.
+-- (RSS olcumuyle bu AYIRT EDILEMEZ; sayiyi veren `heap`, dogru arac oydu.)
+--
+-- Yerine saf yoklama: hs.mouse.getCurrentScreen() surec acmaz, ObjC olayi tasimaz,
+-- sadece hesap yapar. 0.25 sn -> en fazla 250 ms gecikme, pratikte fark edilmiyor.
+-- Eski 3 sn'lik yedek yoklama (screenPoll) bununla gereksizlesti, kaldirildi.
 local function checkScreen()
   local scr = hs.mouse.getCurrentScreen()
   local u = scr and scr:getUUID()
   if u ~= M.lastScreenU then M.lastScreenU = u; onSpace() end
 end
-M.mouseTap = hs.eventtap.new({hs.eventtap.event.types.mouseMoved}, function()
-  local now = hs.timer.secondsSinceEpoch()
-  if now - lastCheck >= 0.1 then lastCheck = now; checkScreen() end
-  return false                      -- olayi TUKETME, sadece dinle
-end)
-M.mouseTap:start()
--- yedek: eventtap durursa (izin kaybi vb.) 3 sn'de bir yine de bak
-M.screenPoll = hs.timer.doEvery(3.0, checkScreen)
+M.screenPoll = hs.timer.doEvery(0.25, checkScreen)
 -- 14.10: ASIL SIZINTI COZUMU. brLevel() 2 sn'de bir ioreg icin kabuk aciyor; her cagri
 -- ObjC tarafinda ~2.4 KB iz birakiyor ve bu ancak Lua GC'si calisinca serbest kaliyor.
 -- Lua yigini ~900 KB oldugu icin GC kendiliginden neredeyse hic tetiklenmiyor ->
