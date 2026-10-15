@@ -4,7 +4,19 @@
 -- HS knob'un serial cikisini okur (cat) -> buton basinca "mod=X" yakalar.
 
 require("hs.ipc")
+
+-- 15.10 KONSOL SIZINTISI. Varsayilan hs.console.maxOutputHistory() = 100.000 satir.
+-- Her satir NSCountableTextLocation/CFString nesnesi tutuyor ve bunlar birikiyordu:
+-- 10 dakikada 320 satir (~1750/saat) -> footprint 29 -> 45 MB. mouseTap sizintisi
+-- cozuldukten sonra kalan buyume buydu.
+hs.console.maxOutputHistory(500)
+
 local M = {}
+-- Ayrintili log. Kapali: sadece DEGISIM satirlari basilir (onVol/onSpace/onBright/onTabs
+-- zaten oyle calisiyor). Acikken pushState'in "girdi" satirlari da gorunur -- onlar
+-- 10 sn'lik SYNC el sikismasiyla deger DEGISMESE DE basiliyordu, gurultunun kaynagi oydu.
+M.debug = false
+local function dbg(...) if M.debug then hs.printf(...) end end
 M.knobMode = "volume"          -- knob firmware modu (serial'dan / hotkey'den takip edilir)
 
 -- ---------- port + gonderme ----------
@@ -145,15 +157,15 @@ local lastV, lastN, lastIdx = -1, -1, -1
 local function pushState()
   if M.knobMode == "volume" then
     local v = volLevel(); lastV = v
-    sendLine("VOL " .. v, true); hs.printf("[knob] volume girdi -> VOL %d", v)
+    sendLine("VOL " .. v, true); dbg("[knob] volume girdi -> VOL %d", v)
   elseif M.knobMode == "spaces" then
     local n, idx = spacesInfo()
     if n then lastN, lastIdx = n, idx; sendLine(string.format("SP %d %d", n, idx), true)
-      hs.printf("[knob] spaces girdi -> SP %d %d", n, idx) end
+      dbg("[knob] spaces girdi -> SP %d %d", n, idx) end
   elseif M.knobMode == "tabs" then
     local n, idx = tabsInfo()
     if n then lastN, lastIdx = n, idx; sendLine(string.format("TAB %d %d", n, idx), true)
-      hs.printf("[knob] tabs girdi -> TAB %d %d", n, idx) end
+      dbg("[knob] tabs girdi -> TAB %d %d", n, idx) end
   elseif M.knobMode == "brightness" then
     local v = brLevel(); if v then lastV = v; sendLine("BR " .. v, true) end   -- okunamazsa LED optimistik kalir
   end
@@ -177,7 +189,7 @@ local function enterTabs()
     tries = tries + 1
     local n, idx = tabsInfo()             -- Chrome frontmost ise gercek sayi doner
     if n then lastN, lastIdx = n, idx; sendLine(string.format("TAB %d %d", n, idx), true)
-      hs.printf("[knob] tabs -> TAB %d %d", n, idx)
+      dbg("[knob] tabs -> TAB %d %d", n, idx)
     elseif tries < 8 then hs.timer.doAfter(0.25, try) end   -- Chrome one gelene kadar dene
   end
   hs.timer.doAfter(0.3, try)
