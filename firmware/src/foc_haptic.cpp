@@ -81,7 +81,9 @@ float volSpacing = 0.220f; // 12.6 deg — 25 centik. ARALIK = GUC (tepe kuvvet 
 // SABIT hedefe (orta) gider, DEGERE degil -> kovalanan hareketli hedef yok, forcing gibi savasamaz.
 static bool     centering = false;
 static uint32_t centerStart = 0;
-static uint32_t centerEndAt = 0;  // konumlandirma bitisi: kisa sure adim uretme
+static uint32_t centerEndAt = 0;
+static bool     recenterArmed = true;   // oto-ortalama: kullanici hareketi basina BIR KEZ
+static uint32_t blockedSince  = 0;      // 'hedeften uzakta ama kimildamiyor' sayaci
 static float    centerTarget = 0;  // ortalamanin hedefi: bar modlarinda SEVIYENIN acisi, digerlerinde orta
 static bool     gotoActive = false; // 'g' TEST komutu: hedef elle verildi, seviye takibi yapma
 // MUTLAK KONUM TUTMA (14.10): varisin son 3 derecesi, centikten BAGIMSIZ.
@@ -471,7 +473,7 @@ static void applyMode(AppMode m) {
   //   aninda iptal (asagida pushingAway). forcing iki kez "kavga ediyor" diye iptal
   //   edilmisti; fark, surekli kovalamamasi.
   // DIGER modlar (space/tabs): eskisi gibi -- sadece duvara yakinsa ortaya al.
-  gotoActive = false; posHold = false; posI = 0;
+  gotoActive = false; posHold = false; posI = 0; recenterArmed = true;
   if (barMode()) relAnchor = levelAngle(level);   // haptik grid MUTLAK (seviye <-> aci sabit)
   if (barMode()) {
     centerTarget = levelAngle(level);
@@ -1199,7 +1201,12 @@ static void focStep() {
       // yonelir. Varinca kapanir, sonrasinda HS motoru surmez.
       if (barMode() && !gotoActive) centerTarget = levelAngle(level);
       float e = motor.shaft_angle - centerTarget;
-      bool absPosNow = gotoActive || barMode();
+      // 15.10: ARTIK HER KONUMLANDIRMA HASSAS YOLU KULLANIYOR.
+      // Eskiden space/tabs ortalamasi ayri ve kaba bir yoldan gidiyordu: Kcenter=6,
+      // integral yok, tolerans 0.05 rad (2.9 deg), 2.5V tavan, 700 ms zaman asimi.
+      // Iki mekanizma tutmanin sebebi yoktu -- ustelik "merkeze tam varamayip tekrar
+      // tetiklenme" dongusu de o kabaligin sonucuydu. Tek yol, tek tolerans (0.05 deg).
+      bool absPosNow = true;
       // Tutma fazina gecis: yakinsa VEYA (nerede olursa olsun) takilip kalmissa.
       // Takilma kapisi ikinci savunma hatti: sertlik yetmezse bile integral devreye girer.
       bool stalled = fabsf(shaftVel()) < 0.3f && millis() - centerStart > 400;
@@ -1225,7 +1232,7 @@ static void focStep() {
       // zor yeniyor; centik ise 22-30 V/rad -> son dereceleri tam merkeze ceker.
       // 'itersen birak' burada YOK: kullanici mod degistirirken knob'u tutmuyor (14.10 karari),
       // ve tam voltajda ufak bir asma bu kontrolu yanlislikla tetikliyordu.
-      bool absPos      = gotoActive || barMode();
+      bool absPos      = true;
       bool reached;
       if (absPos) {
         if (posHold && fabsf(e) < POS_TOL) { if (!posInTolSince) posInTolSince = millis(); }
@@ -1236,14 +1243,29 @@ static void focStep() {
       }
       // Kullanici itince IPTAL. 'g' testinde kapali; HS kaynakli konumlandirmada acik ama
       // esik yuksek (5.0): tam voltajda ufak asma yanlislikla tetiklemesin (14.10 gozlemi).
-      // 15.10: mutlak konumlandirmada KAPALI. Varista hafif asma bunu yanlis tetikliyor
-      // (olculdu: hedef 90.6 iken 181.5'te "kullanici-dokundu" ile kesildi, kimse dokunmamisti).
-      // Knob yarida kalinca konum/seviye ayrisiyordu. Mod gecisi ve HS kaynakli hareketlerde
-      // kullanici knob'u tutmuyor; nazik ortalama (space/tabs) icin kontrol duruyor.
-      bool pushingAway = absPos ? false : (e * shaftVel()) > 2.0f;
+      // TIKANMA ALGILAMA (15.10) — eski "kullanici itiyor" (e*hiz) testinin yerine.
+      // Eskisi anlik carpima bakiyordu ve varistaki hafif asmayla yanlis tetikleniyordu
+      // (olculdu: hedef 90.6 iken 181.5'te kesildi, kimse dokunmamisti).
+      // Yenisi FIZIKSEL: hedeften UZAKTAYIZ, ciddi tork veriyoruz, ama knob KIMILDAMIYOR
+      // -> bir sey tutuyor (el, kablo, mekanik). Hedefe yakinken tetiklenmez, cunku orada
+      // |e| kucuk; integral surtunmeyi yenmek icin tork uretirken yanlis kesilmez.
+      // Iki iptal yolu, ikisi de SADECE hedeften uzaktayken (yakinda asma yanlis tetiklemesin):
+      //   stuck  : kimildamiyoruz -> bir sey tutuyor. ('lastT > 1.5' sarti KALDIRILDI:
+      //            lastT bir onceki dongudendi ve sinirlanmisti, guvenilir tetiklemiyordu.
+      //            Konumlandirma aktifken uzaktaysak zaten tork veriyoruz.)
+      //   driven : kullanici knob'u hedeften UZAGA suruyor, belirgin hizla.
+      // 1.5x aralik: asma bu esigin ICINDE kalsin, yoksa varisa yakin yanlis iptal
+      // (olculdu: hedef 166.5 iken 175.0'te "kullanici-dokundu", kimse dokunmamisti).
+      bool farOut  = fabsf(e) > 1.5f * detentSpacing();
+      bool stuck   = farOut && fabsf(shaftVel()) < 0.3f;
+      bool driven  = farOut && (e * shaftVel()) > 0 && fabsf(shaftVel()) > 0.8f;
+      if (stuck) { if (!blockedSince) blockedSince = millis(); }
+      else blockedSince = 0;
+      bool pushingAway = gotoActive ? false
+                       : (driven || (blockedSince && millis() - blockedSince > 200));
       // Zaman asimi: bar modunda yol 311 deg'e kadar cikabiliyor (326 -> 14.7). Hiz 2.5V/0.35
       // sonumle ~7 rad/s'de doyuyor -> ~0.8 sn. Eski 700 ms yarida keserdi.
-      uint32_t tmo = gotoActive ? 3000 : barMode() ? 1500 : 700;
+      uint32_t tmo = gotoActive ? 3000 : 1500;   // 15.10: ortalama da uzun yol gidebilir (700 kisaydi)
       if (reached || pushingAway || millis() - centerStart > tmo) {
         centering = false;
         // Vardiysa grid'i MUTLAK hedefe hizala (sonraki adimlar seviyeyle ayni yerde kalsin).
@@ -1277,10 +1299,19 @@ static void focStep() {
         // kapatiyordu; knob suzulmeye devam edince kalan hareket adima sayilip
         // Ctrl+Sag/Sol gidiyordu (kullanici gozlemi).
         pendingHid = 0;
-        relAnchor  = barMode() ? relAnchor : motor.shaft_angle;   // grid durdugu yerden
+        if (!barMode()) relAnchor = motor.shaft_angle;   // grid durdugu yerden
+        // hapCenter'i da hizala: aksi halde centik merkezi ile sayim referansi ayrisiyor
+        // (olculdu: d=4.0 deg kaliyordu -> ilk centik bir yone 8.7, digerine 16.7 deg =
+        // asimetrik his). Ikisi ayni noktadan baslamali.
+        hapCenter   = relAnchor;
         centerEndAt = millis();
+        blockedSince = 0;
         if (gotoActive) Serial.printf("GOTO hedef=%.2f hata=%+.3f I=%.2fV ", centerTarget*180.0f/PI,
                                       (motor.shaft_angle - centerTarget)*180.0f/PI, posI);
+        // IPTAL EDILDIYSE PES ETME: yeniden silahla ve sayaci sifirla -> kullanici birakinca
+        // 5 sn sonra tekrar dener. Eskiden iptal sonrasi recenterArmed false kaliyordu, yani
+        // bir kez tutunca knob'u cevirene kadar ortalama olu kaliyordu (kullanici gozlemi).
+        if (pushingAway) { recenterArmed = true; lastUserMove = millis(); }
         posHold = false; posI = 0;
         gotoActive = false;
         Serial.printf("ORTALAMA bitti (%s) aci=%.1f\n",
@@ -1292,7 +1323,7 @@ static void focStep() {
       t -= dampTorque(shaftVel());   // dampTorque icinde etkin sonum secilir
     }
     // ortalama NAZIK (dusuk V, savasamaz) -- ama mutlak konumlandirmada TAM voltaj ("lak diye gitsin").
-    float vmax = (centering && !(gotoActive || barMode())) ? 2.5f : motor.voltage_limit;
+    float vmax = motor.voltage_limit;   // 15.10: ortalama da hassas yolu kullaniyor, tam voltaj
     lastT = _constrain(t, -vmax, vmax);
     motor.move(estMode ? lastT / phaseR : lastT);   // est modda target = AKIM
     if (bIdx == -2 && fabsf(motor.shaft_velocity) > bTrigV) { bIdx = 0; bT0 = micros(); }   // tetik
@@ -1489,6 +1520,7 @@ void loop() {
         int delta = tgt - level;
         lastStepDir = (delta > 0) ? +1 : -1;
         pendingHid += delta;                 // kac adim gerekiyorsa o kadar
+        recenterArmed = true;
         lastUserMove = millis();
         level = tgt;
         updateLED(level);
@@ -1512,6 +1544,7 @@ void loop() {
       // centerEndAt: ortalama bittikten sonra knob oturana kadar adim sayma (15.10).
       if (millis() - modeSwitchAt > 150 && millis() - centerEndAt > 250) {
         pendingHid += uStep; lastUserMove = millis();
+        recenterArmed = true;   // kullanici cevirdi -> durunca bir kez daha ortalayabilir
         if (appMode == APP_SCROLL) {               // scroll: donen nokta (wrap)
           dispIdx = (dispIdx + uStep + NLED) % NLED;
           updateLED(dispIdx);
@@ -1532,10 +1565,17 @@ void loop() {
   // ve knob merkeze doner, her zaman iki yone de yer olur.
   // Bar modlarinda YAPILMAZ: orada konum = seviye, ortalamak degeri bozar.
   // pendingHid bitmeden yapilmaz (bekleyen space gecisleri kaybolmasin).
-  if (!barMode() && appMode != APP_SCROLL && mode == M_DETENT && depState == DEP_OFF
+  // recenterArmed: kullanici hareketi BASINA BIR KEZ. Eskiden sadece mesafe esigine
+  // bakiyordu; ortalama merkeze tam varamazsa (700 ms zaman asimi) kalan sapma esigin
+  // ustunde kalip her 5 saniyede bir tekrar tetikleniyordu -- "dokunmadigim halde surekli
+  // ara duzeltme" (kullanici gozlemi). Olculdu: sapma 6.8 deg, esik 7.45 -- kil payi
+  // altinda kaldigi icin o an dongu olusmadi, ama 8 deg'de olusurdu.
+  if (recenterArmed
+      && !barMode() && appMode != APP_SCROLL && mode == M_DETENT && depState == DEP_OFF
       && !centering && pendingHid == 0 && !hidReleaseAt
       && millis() - lastUserMove > 5000
       && fabsf(motor.shaft_angle - midA()) > 0.5f * detentSpacing()) {
+    recenterArmed = false;          // kullanici tekrar cevirene kadar bir daha deneme
     centerTarget = midA();
     centering    = true;  centerStart = millis();
     posHold      = false; posI = 0; gotoActive = false;
