@@ -456,9 +456,15 @@ static void applyMode(AppMode m) {
   // titreme/salinim yok. Ses 22'de kaliyor: oradaki ayar olcumle oturdu (44 kararsizdi),
   // 30 ses modunda DENENMEDI.
   //   tepe kuvvet = Kdet * aralik / 2
-  //   space/tabs : 30 * 0.26  / 2 = 3.90 V   (aralik genis, sinir egimi daha seyrek)
-  //   ses/parlak : 22 * 0.220 / 2 = 2.42 V
-  Kdet = (m == APP_SPACES || m == APP_TABS) ? 30.0f : 22.0f;
+  //
+  // 20.10 BAR MODLARI 22 -> 15. Sebep: aralik artik kademe sayisindan hesaplaniyor
+  // (12.6 -> 19.0 deg). Kdet 22'de kalinca tepe kuvvet 2.42 -> 3.64 V'a firladi, yani
+  // haftalarca ayarlanip onaylanan histen %50 sert. Kullanici "ses modunda centik
+  // sertligi fazla" dedi; 15 ile tepe 2.49 V, eski hissin pratikte aynisi (onaylandi).
+  // Space/tabs 30'da kaliyor: oradaki aralik hala 14.9 deg sabit, tepe 3.90 V.
+  //   ses/parlaklik : 15 * 0.331 / 2 = 2.49 V   (aralik kademeden, 19.0 deg)
+  //   space/tabs    : 30 * 0.260 / 2 = 3.90 V   (aralik sabit, 14.9 deg)
+  Kdet = (m == APP_SPACES || m == APP_TABS) ? 30.0f : 15.0f;
   forcing = false;
   relAnchor = motor.shaft_angle;                 // goreli referans (ortalama bitince guncellenir)
   updateLED(barMode() ? level : dispIdx);   // 14.10: parlaklik da bar -> level (eskiden dispIdx aliyordu)
