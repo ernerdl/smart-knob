@@ -19,4 +19,5 @@ and indicate if changes were made.
 Attribution: *SmartKnob* by Mehmet Eren Erdal —
 https://github.com/ernerdl/smart-knob
 
-The source code is licensed separately under the MIT License. See `LICENSE`.
+The source code is licensed separately under the MIT License. See `LICENSE`,
+and `NOTICE.md` for the full licensing breakdown including third-party code.

@@ -19,29 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
---------------------------------------------------------------------------
-
-SCOPE
-
-This MIT license covers the source code in this repository: firmware/,
-mac/, app/ and the build configuration.
-
-Documentation (docs/, README.md, hardware/*.md) and the 3D models
-(hardware/*.stl) are licensed separately under CC BY 4.0. See LICENSE-docs.md.
-
---------------------------------------------------------------------------
-
-THIRD-PARTY CODE
-
-firmware/src/MagneticSensorMT6701SSI.cpp
-firmware/src/MagneticSensorMT6701SSI.h
-
-    Unmodified copies of the MT6701 SSI driver from the SimpleFOC drivers
-    library: https://github.com/simplefoc/Arduino-FOC-drivers
-
-    MIT License
-    Copyright (c) 2021 Richard Unger
-
-This project builds on the SimpleFOC library (https://simplefoc.com),
-also MIT licensed, which is fetched at build time and is not vendored here.
