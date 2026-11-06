@@ -167,6 +167,15 @@ Sorularınız olursa issue açın.
 
 ---
 
+## Lisans
+
+- **Kod** (`firmware/`, `mac/`, `app/`): MIT — [LICENSE](LICENSE)
+- **Dokümanlar ve 3B modeller** (`docs/`, `hardware/`, bu README): CC BY 4.0 — [LICENSE-docs.md](LICENSE-docs.md)
+
+`firmware/src/MagneticSensorMT6701SSI.*` dosyaları [SimpleFOC sürücü kütüphanesinden](https://github.com/simplefoc/Arduino-FOC-drivers) değiştirilmeden alınmıştır (MIT, © 2021 Richard Unger).
+
+---
+
 ## English
 
 A desktop haptic rotary knob: BLDC gimbal motor driven with FOC, software-defined detents, USB HID to macOS. ESP32-S3 + SimpleFOC + MT6701 magnetic encoder (SSI) + L6234 driver.
@@ -182,3 +191,5 @@ The valuable part of this repo is the **measured findings**, not the code:
 Firmware includes a full-loop-rate burst recorder (`B`/`G`) because 167 Hz serial telemetry aliases anything above 83 Hz.
 
 Inspired by [scottbez1/smartknob](https://github.com/scottbez1/smartknob); code and hardware are independent.
+
+**License:** code MIT, documentation and 3D models CC BY 4.0. See `LICENSE` and `LICENSE-docs.md`. The MT6701 driver is taken unmodified from [simplefoc/Arduino-FOC-drivers](https://github.com/simplefoc/Arduino-FOC-drivers) (MIT, © 2021 Richard Unger).
